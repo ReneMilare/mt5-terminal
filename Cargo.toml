@@ -1,0 +1,15 @@
+[package]
+name = "mt5-terminal"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Terminal de gráficos e ordens em Rust usando o MetaTrader 5 como ponte com a corretora"
+
+[dependencies]
+chrono = "0.4.45"
+crossbeam-channel = "0.5.17"
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "0.9"
+toml_edit = "0.23"

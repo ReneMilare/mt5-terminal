@@ -1,0 +1,13 @@
+/target
+
+# local runtime output: never part of the repository
+*.log
+*.ex5
+verify*.txt
+*.png
+settings.json
+.env
+.env.*
+
+# private indicator preset: its own repository (see src/studies.rs)
+/preset/
