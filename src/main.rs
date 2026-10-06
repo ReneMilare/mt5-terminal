@@ -75,6 +75,16 @@ struct App {
     verify: Option<preset::verify::Verify>,
     /// MetaTrader 5 was started by the app and hasn't connected yet.
     mt5_starting: bool,
+    /// The Colors window is open; colors changed and not yet written to config.toml.
+    colors_open: bool,
+    colors_dirty: bool,
+    /// The presets editor is open; presets changed and not yet written.
+    presets_open: bool,
+    presets_dirty: bool,
+    /// Account switch waiting for confirmation (switching to a real account asks first).
+    confirm_switch: Option<settings::Account>,
+    /// Account switch in progress: its reports, and the login it goes to.
+    switching: Option<(crossbeam_channel::Receiver<String>, i64)>,
     view: ChartView,
     /// Last tick server time (ms) and when it arrived, to extrapolate server time.
     last_tick: Option<(i64, Instant)>,
@@ -130,11 +140,18 @@ impl App {
             #[cfg(has_preset)]
             verify: args.verify.map(preset::verify::Verify::new),
             mt5_starting: false,
+            colors_open: false,
+            colors_dirty: false,
+            presets_open: false,
+            presets_dirty: false,
+            confirm_switch: None,
+            switching: None,
             view: ChartView::default(),
             last_tick: None,
             status: config_status,
             trading: Trading::default(),
         };
+        app.trading.set_presets(&app.settings.presets, &app.settings.ticket.preset);
         if args.synthetic {
             app.set_source(Source::Synthetic);
         } else if app.settings.mt5.auto_start && !launcher::mt5_running() {
@@ -286,6 +303,16 @@ impl App {
                 }
                 Event::Message(Message::Hello { server, login, account, version, netting, .. }) => {
                     self.connected = true;
+                    // the account switcher learns every account the MT5 connects to (never a password)
+                    if self.source == Source::Mt5 && login != 0 {
+                        let _ = settings::remember_account(login, &server, &account);
+                    }
+                    if let Some((_, target)) = &self.switching
+                        && *target == login
+                    {
+                        self.switching = None;
+                        self.status = Some(format!("conta trocada: {server} · {login}"));
+                    }
                     self.trading.netting = netting;
                     if version < feed::BRIDGE_VERSION {
                         self.status = Some(format!(
@@ -374,6 +401,9 @@ impl App {
                 self.settings.save_ui();
             }
             ui.menu_button("Camadas", |ui| self.layers_menu(ui));
+            if ui.selectable_label(self.colors_open, "Cores").on_hover_text("Cores do app e dos candles").clicked() {
+                self.colors_open = !self.colors_open;
+            }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let mut source = self.source;
@@ -396,10 +426,10 @@ impl App {
         // shown front first: the end of the back-to-front list
         for k in (0..n).rev() {
             ui.horizontal(|ui| {
-                if ui.add_enabled(k + 1 < n, egui::Button::new("↑").small()).on_hover_text("Mais à frente").clicked() {
+                if ui.add_enabled(k + 1 < n, egui::Button::new("frente").small()).on_hover_text("Uma camada mais à frente").clicked() {
                     swap = Some((k, k + 1));
                 }
-                if ui.add_enabled(k > 0, egui::Button::new("↓").small()).on_hover_text("Mais atrás").clicked() {
+                if ui.add_enabled(k > 0, egui::Button::new("trás").small()).on_hover_text("Uma camada mais atrás").clicked() {
                     swap = Some((k, k - 1));
                 }
                 ui.label(layers[k].label());
@@ -437,6 +467,7 @@ impl App {
             Ok((s, warnings)) => {
                 self.pal = s.palette();
                 theme::apply(&self.wake, &self.pal);
+                self.trading.set_presets(&s.presets, &s.ticket.preset);
                 self.settings = s;
                 self.status = (!warnings.is_empty()).then(|| format!("config: {}", warnings.join("; ")));
             }
@@ -486,8 +517,214 @@ impl App {
         .to_string()
     }
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
+    /// Restart MT5 into `account` (confirmed already when it is real).
+    fn switch_account(&mut self, account: settings::Account) {
+        if self.switching.is_some() || self.source != Source::Mt5 {
+            return;
+        }
+        let cmd = if self.settings.mt5.command.is_empty() { launcher::default_mt5_command() } else { self.settings.mt5.command.clone() };
+        let (tx, rx) = crossbeam_channel::unbounded();
+        launcher::switch_account(cmd, account.login, account.server.clone(), tx);
+        self.trading.reset();
+        self.status = Some(format!("trocando para {}…", account.name));
+        self.switching = Some((rx, account.login));
+    }
+
+    /// Like MT5's chart properties, Colors tab: every color, ready-made schemes, applied live and
+    /// written to config.toml once the mouse is released (not on every step of a drag in the picker).
+    fn colors_window(&mut self, ctx: &egui::Context) {
+        if !self.colors_open {
+            return;
+        }
+        let mut open = true;
+        let mut changed = false;
+        egui::Window::new("Cores").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+            ui.label(RichText::new("Predefinições").color(self.pal.text_dim).size(12.0));
+            ui.horizontal_wrapped(|ui| {
+                for (name, colors) in settings::presets() {
+                    if ui.button(name).clicked() {
+                        self.settings.colors = colors;
+                        changed = true;
+                    }
+                }
+            });
+            ui.separator();
+            egui::Grid::new("colors").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                for (key, label) in settings::COLOR_KEYS {
+                    if key == "candle_up" {
+                        ui.label(RichText::new("Candles").strong());
+                        ui.end_row();
+                    }
+                    ui.label(label);
+                    let c = self.settings.colors.color(key);
+                    let mut rgb = [c.r(), c.g(), c.b()];
+                    if egui::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+                        self.settings.colors.set(key, settings::color_hex(Color32::from_rgb(rgb[0], rgb[1], rgb[2])));
+                        changed = true;
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(RichText::new("Corpo igual ao fundo e contorno colorido = candle vazado, como no MT5.").color(self.pal.text_dim).size(11.5));
+            ui.label(RichText::new("Gravadas no config.toml, seção [colors].").color(self.pal.text_dim).size(11.5));
+        });
+        if changed {
+            self.pal = self.settings.palette();
+            theme::apply(ctx, &self.pal);
+            self.colors_dirty = true;
+        }
+        if self.colors_dirty && !ctx.input(|i| i.pointer.any_down()) {
+            if let Err(e) = settings::save_colors(&self.settings.colors) {
+                self.status = Some(format!("não gravou as cores: {e}"));
+            }
+            self.config_mtime = settings::mtime();
+            self.colors_dirty = false;
+        }
+        if !open {
+            self.colors_open = false;
+        }
+    }
+
+    /// Remember the preset chosen in the ticket, and run the presets editor.
+    fn presets_ui(&mut self, ctx: &egui::Context) {
+        if self.trading.active_name() != self.settings.ticket.preset {
+            self.settings.ticket.preset = self.trading.active_name().to_string();
+            self.presets_dirty = true;
+        }
+        if std::mem::take(&mut self.trading.edit_presets) {
+            self.presets_open = true;
+        }
+        if self.presets_open {
+            let mut open = true;
+            let mut changed = false;
+            let mut remove = None;
+            let mut use_it = None;
+            egui::Window::new("Operações predefinidas").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+                ui.label(
+                    RichText::new("Volume, stop e alvo prontos. Com Shift (compra) ou Ctrl (venda) no gráfico, a operação ativa acompanha o ponteiro.")
+                        .color(self.pal.text_dim)
+                        .size(11.5),
+                );
+                ui.add_space(4.0);
+                egui::Grid::new("presets").num_columns(7).spacing([10.0, 6.0]).show(ui, |ui| {
+                    for h in ["Nome", "Volume", "Stop", "Alvo", "Unidade", "", ""] {
+                        ui.label(RichText::new(h).color(self.pal.text_dim).size(11.5));
+                    }
+                    ui.end_row();
+                    let active = self.trading.preset;
+                    for (i, p) in self.settings.presets.iter_mut().enumerate() {
+                        changed |= ui.add_sized([170.0, 20.0], egui::TextEdit::singleline(&mut p.name)).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut p.volume).speed(0.01).range(0.01..=1000.0).max_decimals(2)).changed();
+                        let pct = p.unit == "percent";
+                        let speed = if pct { 0.01 } else { 1.0 };
+                        changed |= ui.add(egui::DragValue::new(&mut p.stop).speed(speed).range(0.0..=f64::MAX).max_decimals(2)).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut p.target).speed(speed).range(0.0..=f64::MAX).max_decimals(2)).changed();
+                        egui::ComboBox::from_id_salt(("unit", i)).selected_text(if pct { "%" } else { "pontos" }).width(70.0).show_ui(ui, |ui| {
+                            for (u, label) in [("percent", "%"), ("points", "pontos")] {
+                                if ui.selectable_label(p.unit == u, label).clicked() && p.unit != u {
+                                    p.unit = u.into();
+                                    changed = true;
+                                }
+                            }
+                        });
+                        if ui.add_enabled(active != Some(i), egui::Button::new(if active == Some(i) { "ativa" } else { "usar" }).small()).clicked() {
+                            use_it = Some(i);
+                        }
+                        if ui.small_button("remover").clicked() {
+                            remove = Some(i);
+                        }
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(4.0);
+                if ui.button("+ Nova operação").clicked() {
+                    let n = self.settings.presets.len() + 1;
+                    let volume = self.trading.order_volume();
+                    self.settings.presets.push(settings::Preset {
+                        name: format!("Operação {n}"),
+                        volume,
+                        stop: 0.2,
+                        target: 0.4,
+                        unit: "percent".into(),
+                    });
+                    changed = true;
+                }
+                ui.label(RichText::new("Gravadas no config.toml ([[presets]]).").color(self.pal.text_dim).size(11.5));
+            });
+            let active = self.trading.active_name().to_string();
+            if let Some(i) = remove {
+                self.settings.presets.remove(i);
+                changed = true;
+            }
+            if changed {
+                // names may have changed: keep the active one by position when its name was edited
+                let keep = self.trading.preset.filter(|&i| remove != Some(i)).map(|i| if remove.is_some_and(|r| r < i) { i - 1 } else { i });
+                let name = keep.and_then(|i| self.settings.presets.get(i)).map(|p| p.name.clone()).unwrap_or(active);
+                self.trading.set_presets(&self.settings.presets, &name);
+                self.presets_dirty = true;
+            }
+            if let Some(i) = use_it {
+                self.trading.preset = Some(i);
+            }
+            if !open {
+                self.presets_open = false;
+            }
+        }
+        if self.presets_dirty && !ctx.input(|i| i.pointer.any_down()) && !ctx.egui_wants_keyboard_input() {
+            self.settings.ticket.preset = self.trading.active_name().to_string();
+            if let Err(e) = settings::save_presets(&self.settings.presets, &self.settings.ticket.preset) {
+                self.status = Some(format!("não gravou as operações: {e}"));
+            }
+            self.config_mtime = settings::mtime();
+            self.presets_dirty = false;
+        }
+    }
+
+    /// Progress of an account switch, and the confirmation before a real account.
+    fn account_switch_ui(&mut self, ctx: &egui::Context) {
+        if let Some((rx, _)) = &self.switching {
+            let msgs: Vec<String> = rx.try_iter().collect();
+            if let Some(last) = msgs.last() {
+                self.status = Some(last.clone());
+                if last.starts_with("erro") {
+                    self.switching = None;
+                }
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        let Some(target) = self.confirm_switch.clone() else { return };
+        let mut decision = None;
+        let modal = egui::Modal::new(egui::Id::new("confirm-real")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new("Trocar para a conta REAL?").strong().size(16.0).color(self.pal.danger));
+            ui.add_space(6.0);
+            ui.label(format!("{} · {} · {}", target.name, target.server, target.login));
+            ui.label("O MetaTrader 5 fecha e abre de novo nessa conta. As ordens continuam travadas até você armar a conta REAL na boleta.");
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button(RichText::new("Trocar para REAL").strong().color(self.pal.danger)).clicked() {
+                    decision = Some(true);
+                }
+                if ui.button("Cancelar").clicked() {
+                    decision = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && decision.is_none() {
+            decision = Some(false);
+        }
+        if let Some(go) = decision {
+            self.confirm_switch = None;
+            if go {
+                self.switch_account(target);
+            }
+        }
+    }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
         let pal = &self.pal;
+        let mut chosen: Option<settings::Account> = None;
         ui.horizontal_centered(|ui| {
             let (color, text) = match (self.source, self.connected, &self.bridge_error) {
                 (Source::Mt5, _, Some(err)) => (pal.danger, err.clone()),
@@ -500,15 +737,33 @@ impl App {
                 (Source::Synthetic, false, _) => (pal.warn, "iniciando…".into()),
             };
             dot(ui, color, 4.0);
-            ui.label(RichText::new(text).color(pal.text_dim).size(12.0));
+            // the account label opens the switcher (accounts the MT5 has connected to)
+            let current = self.account.as_ref().map(|a| a.login);
+            if self.source == Source::Mt5 && !self.settings.accounts.is_empty() && self.switching.is_none() {
+                ui.menu_button(RichText::new(format!("{text}  · trocar conta")).color(pal.text_dim).size(12.0), |ui| {
+                    ui.label(RichText::new("Trocar de conta (reinicia o MetaTrader 5)").color(pal.text_dim).size(11.5));
+                    for a in &self.settings.accounts {
+                        let label = format!("{} · {}{}", a.name, a.server, if a.is_real() { "  · REAL" } else { "" });
+                        let here = current == Some(a.login);
+                        if ui.add_enabled(!here, egui::Button::selectable(here, label)).clicked() {
+                            chosen = Some(a.clone());
+                            ui.close();
+                        }
+                    }
+                });
+            } else {
+                ui.label(RichText::new(text).color(pal.text_dim).size(12.0));
+            }
             if let Some(acc) = &self.account {
                 let (bg, label) = match acc.kind.as_str() {
                     "real" => (pal.danger, "REAL"),
                     "contest" => (pal.warn, "CONCURSO"),
                     _ => (pal.tag_bg, "DEMO"),
                 };
+                // white on the red/yellow badges, the text color on the neutral one (light themes)
+                let fg = if acc.kind == "real" || acc.kind == "contest" { Color32::WHITE } else { pal.text };
                 egui::Frame::new().fill(bg).corner_radius(4).inner_margin(egui::Margin::symmetric(6, 0)).show(ui, |ui| {
-                    ui.label(RichText::new(label).strong().size(10.5).color(Color32::WHITE));
+                    ui.label(RichText::new(label).strong().size(10.5).color(fg));
                 });
             }
             if let Some(s) = &self.status {
@@ -523,6 +778,11 @@ impl App {
                 }
             });
         });
+        match chosen {
+            Some(a) if a.is_real() => self.confirm_switch = Some(a),
+            Some(a) => self.switch_account(a),
+            None => {}
+        }
     }
 }
 
@@ -530,6 +790,10 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.watch_config();
         self.serve_control();
+        let ctx = ui.ctx().clone();
+        self.account_switch_ui(&ctx);
+        self.colors_window(&ctx);
+        self.presets_ui(&ctx);
         self.pump();
         egui::Panel::top("top")
             .exact_size(40.0)
@@ -591,6 +855,7 @@ impl eframe::App for App {
         } else {
             (Vec::new(), Vec::new(), None)
         };
+        let volume_text = self.trading.volume_text();
         let empty = Series::default();
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let data = ChartData {
@@ -604,6 +869,9 @@ impl eframe::App for App {
                 pane: pane.as_ref(),
                 layers: &self.settings.chart.layers,
                 quote: self.trading.quote.filter(|_| can_trade),
+                tick: self.trading.tick_size(),
+                order_volume: &volume_text,
+                bracket: Some(self.trading.bracket()),
             };
             self.view.ui(ui, &data, &self.pal);
         });

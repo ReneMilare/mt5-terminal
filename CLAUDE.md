@@ -24,13 +24,22 @@ por isso antes de qualquer outra coisa.
 ## Gráfico
 
 - O **preço fica na frente de tudo** por padrão (`Layer::DEFAULT`, de trás para a frente: níveis,
-  indicadores, posições/ordens, preço). O usuário muda a ordem no menu **Camadas**; a escolha fica em
-  `~/.config/mt5-terminal/settings.json` (`settings.rs`). O volume fica sempre no fundo.
+  indicadores, posições/ordens, preço). O usuário muda a ordem no menu **Camadas**; a escolha fica no
+  `config.toml` (`chart.layers`). O volume fica sempre no fundo.
+- Operações predefinidas (`[[presets]]`: volume, stop e alvo em % da entrada ou em pontos; a ativa em
+  `[ticket] preset`): escolhidas na boleta, editadas na janela "Operações predefinidas"; com Shift/Ctrl a
+  ordem que segue o ponteiro já mostra o stop e o alvo (`trading::Bracket`). Volumes e preços vão à
+  corretora exatamente na grade do símbolo (`round_to`, sem ruído de ponto flutuante).
+- Cores (janela **Cores**, como a aba de cores do MT5): fundo, painéis, grade, texto, destaque, alta/baixa
+  e candles (corpo e contorno/pavio separados; corpo ≠ contorno desenha borda), com predefinições;
+  aplicadas na hora e gravadas em `[colors]` (`COLOR_KEYS` em `settings.rs`).
 - Teclado: ←/→ movem, +/− zoom (fora de campos de texto). Atalhos de ordem: Ctrl+Shift+B/S (compra/venda), Z (zerar), R (inverter), E (breakeven).
-- Como no ProfitChart: Shift+clique compra e Ctrl+clique vende no preço clicado (limite do lado
-  favorável, stop do outro); arrastar a linha de uma posição para o lado do ganho põe o alvo, para o
-  da perda o stop (compra: cima = alvo); linhas de ordem, stop e alvo se arrastam; botão direito abre
-  um menu de ordens. Tudo sob as mesmas travas da boleta.
+- Como no ProfitChart: segurando Shift (compra) ou Ctrl (venda) a ordem acompanha o ponteiro, já no
+  preço do tick, e o clique a posiciona (limite do lado favorável, stop do outro); arrastar a linha de
+  uma posição **com Alt segurado** para o lado do ganho põe o alvo, para o da perda o stop (compra:
+  cima = alvo); com Alt, linhas de ordem, stop e alvo se arrastam (sem Alt, arrastar só move o gráfico); o × da linha (ou Delete com o mouse sobre ela) fecha a posição (o
+  stop e o alvo dela vão junto), cancela a ordem ou tira só o stop/alvo; botão direito abre um menu.
+  Tudo sob as mesmas travas da boleta.
 
 ## Indicadores
 
@@ -52,7 +61,11 @@ preset ficam em `preset/CLAUDE.md`.
 
 - Uma instância só: ela é dona da porta do EA (47011). Abrir de novo traz a existente para a frente e
   sai (`launcher.rs`); só `--synthetic` roda ao lado. Ao abrir, se o MetaTrader 5 não estiver rodando,
-  o app o abre como o atalho dele (`settings.json`: `auto_start_mt5`, `mt5_command`).
+  o app o abre como o atalho dele (`config.toml`: `mt5.auto_start`, `mt5.command`).
+- Troca de conta pela barra de status: o app fecha o MT5 pela janela (`hl.dsp.window.close`), reabre
+  com `/config:` (login e servidor, Algo Trading mantido) e devolve a janela ao workspace dela. Senha
+  nunca no app: o MT5 usa a que salvou. Contas em `[[accounts]]`, aprendidas a cada conexão; trocar para
+  REAL pede confirmação. O `ctl` não troca de conta.
 
 ## EA
 

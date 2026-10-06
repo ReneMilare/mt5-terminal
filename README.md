@@ -7,8 +7,13 @@ cotações, histórico, posições e ordens.
 - Gráfico próprio: histórico carregado aos poucos conforme você volta no tempo, preço na frente de tudo
   (ordem das camadas configurável), teclado (←/→, +/−).
 - Boleta: mercado, limite e stop, stop e alvo por distância, ZERAR, INVERTER (netting e hedge), BE.
-- No gráfico, como no ProfitChart: Shift+clique compra, Ctrl+clique vende, arrastar a linha da
-  operação põe alvo ou stop, arrastar ordens/stops/alvos os move.
+- Operações predefinidas (ex.: 0,2 com stop de 0,20% e alvo de 0,40%): com Shift/Ctrl a ordem que
+  acompanha o ponteiro já leva o volume, o stop e o alvo.
+- No gráfico, como no ProfitChart: segure Shift (compra) ou Ctrl (venda) e a ordem acompanha o
+  ponteiro até o clique; com Alt segurado, arrastar a linha da operação põe alvo ou stop e arrastar
+  ordens/stops/alvos os move (sem Alt, arrastar move o gráfico); o × da linha (ou Delete sobre ela) fecha a posição, cancela a ordem ou tira o stop/alvo.
+- Troca entre conta demo e real pela barra de status (o app reinicia o MT5 na conta escolhida; a
+  senha fica só no MT5).
 - Conta REAL travada até você armar a boleta; fonte **Sintético** com corretora simulada para testar
   sem o MT5.
 

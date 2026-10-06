@@ -22,8 +22,13 @@ const MIN_BAR_PX: f32 = 1.0;
 const MAX_BAR_PX: f32 = 120.0;
 /// Vertical drag (px) before a pan of the plot turns auto-scale off.
 const UNLOCK_Y_PX: f32 = 14.0;
-/// How close (px) the pointer must be to a trade line to grab it.
+/// How close (px) the pointer must be to a trade line for Delete.
 const GRAB_PX: f32 = 5.0;
+/// With Alt held, how close (px) to grab a trade line and drag it (wider: Alt makes the intent clear).
+const ALT_GRAB_PX: f32 = 10.0;
+/// The × that removes an order/stop/target: a square left of the line's tag.
+const REMOVE_X: f32 = 48.0;
+const REMOVE_W: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Zone {
@@ -71,6 +76,8 @@ pub enum Handle {
 pub enum ChartAction {
     /// A trade line was dropped at `price`.
     Move { handle: Handle, price: f64 },
+    /// The × of a line (or Delete over it): close the position, cancel the order, or drop that stop/target.
+    Remove { handle: Handle },
     /// New pending order from the context menu.
     Order { side: Side, kind: OrderKind, price: f64 },
 }
@@ -115,6 +122,17 @@ pub struct ChartData<'a> {
     pub layers: &'a [Layer],
     /// Bid/ask of the symbol, to tell limit from stop in the context menu (None: no menu).
     pub quote: Option<(f64, f64)>,
+    /// Price step of the symbol (the order following the pointer shows the price it will get).
+    pub tick: f64,
+    /// Volume of the ticket, shown on the order following the pointer.
+    pub order_volume: &'a str,
+    /// Stop and target of the next order, drawn with the order following the pointer.
+    pub bracket: Option<crate::trading::Bracket>,
+}
+
+/// Lines with a × to remove them: every trade line (a position's × closes it).
+fn removable(_h: Handle) -> bool {
+    true
 }
 
 /// What the price plot draws, in an order the user picks (the last one is in front).
@@ -204,6 +222,8 @@ pub struct Level {
     pub dashed: bool,
     /// Set when the line can be dragged (trading allowed).
     pub handle: Option<Handle>,
+    /// Side of a position's entry line: dragging it out previews a target or a stop.
+    pub side: Option<Side>,
 }
 
 struct Frame {
@@ -293,21 +313,64 @@ impl ChartView {
         let (lo0, hi0) = (self.y_lo, self.y_hi);
         let price_at = |y: f32| lo0 + ((plot.bottom() - y) / plot.height()) as f64 * (hi0 - lo0);
         let y_at = |price: f64| plot.bottom() - ((price - lo0) / (hi0 - lo0)) as f32 * plot.height();
-        let grab = |p: Pos2| -> Option<Handle> {
+        let grab_within = |p: Pos2, px: f32| -> Option<Handle> {
             if !plot.contains(p) {
                 return None;
             }
             data.levels
                 .iter()
                 .filter_map(|l| l.handle.map(|h| (h, (y_at(l.price) - p.y).abs())))
-                .filter(|(_, d)| *d <= GRAB_PX)
+                .filter(|(_, d)| *d <= px)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(h, _)| h)
         };
+        let grab = |p: Pos2| grab_within(p, GRAB_PX);
+        // trade lines drag only with Alt held; without it a drag always pans the chart
+        let alt = ui.input(|i| i.modifiers.alt);
+        let alt_grab = |p: Pos2| if alt { grab_within(p, ALT_GRAB_PX) } else { None };
+        // the × of a removable line under the pointer
+        let remove_at = |p: Pos2| -> Option<Handle> {
+            if p.x < plot.left() + REMOVE_X || p.x > plot.left() + REMOVE_X + REMOVE_W {
+                return None;
+            }
+            data.levels
+                .iter()
+                .filter_map(|l| l.handle.filter(|h| removable(*h)).map(|h| (h, (y_at(l.price) - p.y).abs())))
+                .filter(|(_, d)| *d <= REMOVE_W / 2.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(h, _)| h)
+        };
+        // Shift (buy) or Ctrl (sell) held: the order follows the pointer until the click places it
+        let mods = ui.input(|i| i.modifiers);
+        let ghost_side = match (mods.shift, mods.ctrl) {
+            (true, false) => Some(Side::Buy),
+            (false, true) => Some(Side::Sell),
+            _ => None,
+        };
+        let snap_price = |price: f64| if data.tick > 0.0 { (price / data.tick).round() * data.tick } else { price };
+        let ghost = match (ghost_side, hover.filter(|p| plot.contains(*p)), data.quote) {
+            (Some(side), Some(p), Some((bid, ask))) if self.level_drag.is_none() && self.drag.is_none() => {
+                let price = snap_price(price_at(p.y));
+                let kind = match side {
+                    Side::Buy if price < ask => OrderKind::Limit,
+                    Side::Sell if price > bid => OrderKind::Limit,
+                    _ => OrderKind::Stop,
+                };
+                Some((side, kind, price))
+            }
+            _ => None,
+        };
+        if let Some(h) = hover.and_then(grab).filter(|h| removable(*h))
+            && ui.input(|i| i.key_pressed(egui::Key::Delete))
+        {
+            self.actions.push(ChartAction::Remove { handle: h });
+        }
         if let Some(p) = hover {
             ui.ctx().set_cursor_icon(match zone_at(p) {
                 _ if self.level_drag.is_some() => CursorIcon::Grabbing,
-                Zone::Plot if self.drag.is_none() && grab(p).is_some() => CursorIcon::ResizeVertical,
+                _ if remove_at(p).is_some() => CursorIcon::PointingHand,
+                _ if ghost.is_some() => CursorIcon::Crosshair,
+                Zone::Plot if self.drag.is_none() && alt_grab(p).is_some() => CursorIcon::ResizeVertical,
                 Zone::PriceAxis => CursorIcon::ResizeVertical,
                 Zone::TimeAxis => CursorIcon::ResizeHorizontal,
                 Zone::Plot if self.drag.is_some() => CursorIcon::Grabbing,
@@ -322,8 +385,10 @@ impl ChartView {
         }
 
         if response.drag_started() {
-            let at = response.interact_pointer_pos();
-            match at.and_then(|p| grab(p).map(|h| (h, price_at(p.y)))) {
+            // where the button went down: egui reports a drag only after the pointer has moved a few
+            // pixels, by then off a thin line (a fast hand would pan instead of grabbing it)
+            let at = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos());
+            match at.and_then(|p| alt_grab(p).map(|h| (h, price_at(p.y)))) {
                 Some(grabbed) => self.level_drag = Some(grabbed),
                 None => self.drag = at.map(zone_at),
             }
@@ -339,19 +404,16 @@ impl ChartView {
                 self.actions.push(ChartAction::Move { handle, price });
             }
         }
-        // ProfitChart: Shift+click buys, Ctrl+click sells at the clicked price (limit on the favorable
-        // side of the quote, stop on the other)
-        if response.clicked()
-            && let (Some(p), Some((bid, ask))) = (response.interact_pointer_pos().filter(|p| plot.contains(*p)), data.quote)
-        {
-            let m = ui.input(|i| i.modifiers);
-            let price = price_at(p.y);
-            if m.shift && !m.ctrl {
-                let kind = if price < ask { OrderKind::Limit } else { OrderKind::Stop };
-                self.actions.push(ChartAction::Order { side: Side::Buy, kind, price });
-            } else if m.ctrl && !m.shift {
-                let kind = if price > bid { OrderKind::Limit } else { OrderKind::Stop };
-                self.actions.push(ChartAction::Order { side: Side::Sell, kind, price });
+        // a click on a × removes; with Shift/Ctrl held it places the order following the pointer
+        // (ProfitChart: Shift buys, Ctrl sells; limit on the favorable side of the quote, stop beyond)
+        if response.clicked() {
+            match response.interact_pointer_pos().and_then(remove_at) {
+                Some(handle) => self.actions.push(ChartAction::Remove { handle }),
+                None => {
+                    if let Some((side, kind, price)) = ghost {
+                        self.actions.push(ChartAction::Order { side, kind, price });
+                    }
+                }
             }
         }
         // right click: pending order at that price
@@ -536,7 +598,7 @@ impl ChartView {
         mesh.reserve_vertices((i1 + 1 - i0) * 8);
         for (i, b) in bars.iter().enumerate().take(i1 + 1).skip(i0) {
             let up = b.close >= b.open;
-            let color = if up { pal.up } else { pal.down };
+            let (body, wick) = if up { (pal.candle_up, pal.wick_up) } else { (pal.candle_down, pal.wick_down) };
             let cx = f.x(i as f64);
             if max_vol > 0.0 {
                 let h = (b.volume / max_vol) as f32 * vol_h;
@@ -551,13 +613,21 @@ impl ChartView {
             }
             let (yh, yl) = (f.y(b.high), f.y(b.low));
             let wx = f.snap(cx - wick_w / 2.0, false);
-            mesh.add_colored_rect(Rect::from_min_max(Pos2::new(wx, yh), Pos2::new(wx + wick_w, yl.max(yh + 1.0 / ppp))), color);
+            mesh.add_colored_rect(Rect::from_min_max(Pos2::new(wx, yh), Pos2::new(wx + wick_w, yl.max(yh + 1.0 / ppp))), wick);
             if body_w > 0.0 {
                 let (yo, yc) = (f.y(b.open), f.y(b.close));
                 let (top, bottom) = (yo.min(yc), yo.max(yc).max(yo.min(yc) + 1.0 / ppp));
                 let left = f.snap(cx - body_w / 2.0, false);
                 let right = f.snap(cx + body_w / 2.0, false).max(left + 1.0 / ppp);
-                mesh.add_colored_rect(Rect::from_min_max(Pos2::new(left, top), Pos2::new(right, bottom)), color);
+                let rect = Rect::from_min_max(Pos2::new(left, top), Pos2::new(right, bottom));
+                // body unlike its outline (MT5 bar color): an outline, then the body inside it
+                let edge = 1.0 / ppp;
+                if body != wick && rect.width() > 2.0 * edge && rect.height() > 2.0 * edge {
+                    mesh.add_colored_rect(rect, wick);
+                    mesh.add_colored_rect(rect.shrink(edge), body);
+                } else {
+                    mesh.add_colored_rect(rect, body);
+                }
             }
         }
         // volume is background context: always behind every layer
@@ -612,6 +682,22 @@ impl ChartView {
                 Layer::Trades => {
                     for level in data.levels {
                         let dragged = self.level_drag.filter(|(h, _)| Some(*h) == level.handle).map(|(_, p)| p);
+                        // a position stays put: dragging out of it previews the target or stop it creates
+                        if let (Some(price), Some(side)) = (dragged, level.side) {
+                            let gain = if side == Side::Buy { price > level.price } else { price < level.price };
+                            let (color, name) = if gain { (pal.ok, "Alvo") } else { (pal.danger, "Stop") };
+                            let y = f.snap(f.y(price), true);
+                            plot_painter.extend(Shape::dashed_line(&[Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)], Stroke::new(1.5, color), 8.0, 4.0));
+                            let text = format!("{name} @ {price:.d$}  (solte para posicionar)", d = digits as usize);
+                            let galley = painter.layout_no_wrap(text, FontId::proportional(11.5), Color32::WHITE);
+                            let tag = Rect::from_min_size(Pos2::new(plot.left() + 70.0, y - 9.0), Vec2::new(galley.size().x + 12.0, 18.0));
+                            plot_painter.rect_filled(tag, CornerRadius::same(3), color);
+                            plot_painter.galley(tag.center() - galley.size() / 2.0, galley, Color32::WHITE);
+                            let ptag = Rect::from_min_size(Pos2::new(price_axis.left() + 1.0, y - 9.5), Vec2::new(PRICE_AXIS_W - 2.0, 19.0));
+                            painter.rect_filled(ptag, CornerRadius::same(3), color);
+                            painter.text(Pos2::new(ptag.left() + 7.0, y), Align2::LEFT_CENTER, format!("{price:.d$}", d = digits as usize), FontId::proportional(11.5), Color32::WHITE);
+                        }
+                        let dragged = dragged.filter(|_| level.side.is_none());
                         if dragged.is_some() {
                             let y = f.snap(f.y(level.price), true);
                             plot_painter.extend(Shape::dashed_line(
@@ -637,6 +723,15 @@ impl ChartView {
                         let tag = Rect::from_min_size(Pos2::new(plot.left() + 70.0, y - 9.0), Vec2::new(galley.size().x + 12.0, 18.0));
                         plot_painter.rect_filled(tag, CornerRadius::same(3), level.color);
                         plot_painter.galley(tag.center() - galley.size() / 2.0, galley, Color32::WHITE);
+                        if level.handle.is_some_and(removable) && dragged.is_none() {
+                            let x = Rect::from_min_size(Pos2::new(plot.left() + REMOVE_X, y - REMOVE_W / 2.0), Vec2::splat(REMOVE_W));
+                            let hot = hover.is_some_and(|p| x.contains(p));
+                            plot_painter.rect_filled(x, CornerRadius::same(3), if hot { pal.danger } else { level.color });
+                            let (a, b) = (x.shrink(5.0).left_top(), x.shrink(5.0).right_bottom());
+                            let stroke = Stroke::new(1.6, Color32::WHITE);
+                            plot_painter.line_segment([a, b], stroke);
+                            plot_painter.line_segment([Pos2::new(a.x, b.y), Pos2::new(b.x, a.y)], stroke);
+                        }
                         let ptag = Rect::from_min_size(Pos2::new(price_axis.left() + 1.0, y - 9.5), Vec2::new(PRICE_AXIS_W - 2.0, 19.0));
                         painter.rect_filled(ptag, CornerRadius::same(3), level.color);
                         painter.text(
@@ -653,6 +748,51 @@ impl ChartView {
         // a layer list without the price still shows the candles
         if let Some(mesh) = candles.take() {
             plot_painter.add(Shape::mesh(mesh));
+        }
+        // the order following the pointer, on top of everything
+        if let Some((side, kind, price)) = ghost {
+            let color = if side == Side::Buy { pal.up } else { pal.down };
+            let y = f.snap(f.y(price), true);
+            plot_painter.extend(Shape::dashed_line(
+                &[Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+                Stroke::new(1.5, color),
+                8.0,
+                4.0,
+            ));
+            let text = format!(
+                "{} {} {} @ {:.d$}  (clique para posicionar)",
+                if side == Side::Buy { "Compra" } else { "Venda" },
+                if kind == OrderKind::Limit { "limite" } else { "stop" },
+                data.order_volume,
+                price,
+                d = digits as usize
+            );
+            let galley = painter.layout_no_wrap(text, FontId::proportional(11.5), Color32::WHITE);
+            let tag = Rect::from_min_size(Pos2::new(plot.left() + 70.0, y - 20.0), Vec2::new(galley.size().x + 12.0, 18.0));
+            plot_painter.rect_filled(tag, CornerRadius::same(3), color);
+            plot_painter.galley(tag.center() - galley.size() / 2.0, galley, Color32::WHITE);
+            let ptag = Rect::from_min_size(Pos2::new(price_axis.left() + 1.0, y - 9.5), Vec2::new(PRICE_AXIS_W - 2.0, 19.0));
+            painter.rect_filled(ptag, CornerRadius::same(3), color);
+            painter.text(Pos2::new(ptag.left() + 7.0, y), Align2::LEFT_CENTER, format!("{price:.d$}", d = digits as usize), FontId::proportional(11.5), Color32::WHITE);
+            // its stop and target, where they will be placed
+            if let Some(b) = data.bracket {
+                let (sl, tp) = b.levels(side, price, data.tick);
+                for (level, offset, sign, name, c) in [(sl, b.stop, '-', "Stop", pal.danger), (tp, b.target, '+', "Alvo", pal.ok)] {
+                    if level <= 0.0 {
+                        continue;
+                    }
+                    let y = f.snap(f.y(level), true);
+                    plot_painter.extend(Shape::dashed_line(&[Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)], Stroke::new(1.2, c), 5.0, 4.0));
+                    let text = format!("{name} {} @ {level:.d$}", offset.label(sign), d = digits as usize);
+                    let galley = painter.layout_no_wrap(text, FontId::proportional(11.0), Color32::WHITE);
+                    let tag = Rect::from_min_size(Pos2::new(plot.left() + 70.0, y - 9.0), Vec2::new(galley.size().x + 12.0, 18.0));
+                    plot_painter.rect_filled(tag, CornerRadius::same(3), c);
+                    plot_painter.galley(tag.center() - galley.size() / 2.0, galley, Color32::WHITE);
+                    let ptag = Rect::from_min_size(Pos2::new(price_axis.left() + 1.0, y - 9.5), Vec2::new(PRICE_AXIS_W - 2.0, 19.0));
+                    painter.rect_filled(ptag, CornerRadius::same(3), c);
+                    painter.text(Pos2::new(ptag.left() + 7.0, y), Align2::LEFT_CENTER, format!("{level:.d$}", d = digits as usize), FontId::proportional(11.5), Color32::WHITE);
+                }
+            }
         }
         if let Some(pane) = data.pane {
             self.draw_pane(&painter.with_clip_rect(pane_rect), pane_rect, &f, pane, i0, i1, pal);
@@ -776,7 +916,7 @@ impl ChartView {
             let w = pane.boxed.iter().map(|(t, _)| t.chars().count()).max().unwrap_or(0) as f32 * 6.6 + 14.0;
             let left = (rect.left() + 470.0).min(rect.right() - w - 8.0);
             let bg = Rect::from_min_size(Pos2::new(left, rect.top() + 6.0), Vec2::new(w, 15.0 * pane.boxed.len() as f32 + 8.0));
-            painter.rect_filled(bg, CornerRadius::same(3), Color32::from_rgb(21, 24, 29));
+            painter.rect_filled(bg, CornerRadius::same(3), pal.panel_bg);
             for (k, (line, color)) in pane.boxed.iter().enumerate() {
                 painter.text(Pos2::new(bg.left() + 7.0, bg.top() + 4.0 + 15.0 * k as f32), Align2::LEFT_TOP, line, font.clone(), *color);
             }

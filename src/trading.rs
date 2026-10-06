@@ -3,11 +3,60 @@
 
 use crate::chart::{ChartAction, Handle, Level};
 use crate::feed::{Command, Message, OrderKind, PendingOrder, Position, Side};
+use crate::settings::Preset;
 use crate::theme::Palette;
 use eframe::egui::{self, Align, Color32, Layout, RichText};
 use std::collections::{HashMap, VecDeque};
 
 const LOG_LINES: usize = 6;
+
+/// How far a stop or a target is from the entry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Offset {
+    None,
+    /// Percent of the entry price.
+    Percent(f64),
+    /// Price distance.
+    Points(f64),
+}
+
+impl Offset {
+    fn distance(self, entry: f64) -> f64 {
+        match self {
+            Offset::None => 0.0,
+            Offset::Percent(p) => entry * p / 100.0,
+            Offset::Points(d) => d,
+        }
+    }
+
+    /// "-0.20%", "+40 pts"...
+    pub fn label(self, sign: char) -> String {
+        match self {
+            Offset::None => String::new(),
+            Offset::Percent(p) => format!("{sign}{p:.2}%"),
+            Offset::Points(d) => format!("{sign}{d} pts"),
+        }
+    }
+}
+
+/// Stop and target of an order, relative to its entry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bracket {
+    pub stop: Offset,
+    pub target: Offset,
+}
+
+impl Bracket {
+    /// Absolute stop and target (0 = none) for `side` entering at `entry`, on the tick grid.
+    pub fn levels(&self, side: Side, entry: f64, tick: f64) -> (f64, f64) {
+        let dir = if side == Side::Buy { 1.0 } else { -1.0 };
+        let at = |o: Offset, sign: f64| {
+            let d = o.distance(entry);
+            if d > 0.0 { round_to(entry + sign * dir * d, tick) } else { 0.0 }
+        };
+        (at(self.stop, -1.0), at(self.target, 1.0))
+    }
+}
 
 /// Trading rules of the chart symbol.
 pub struct Spec {
@@ -44,6 +93,11 @@ pub struct Trading {
     armed: bool,
     /// Netting account (one position per symbol): reversing is a single order.
     pub netting: bool,
+    /// Ready-made orders (config `[[presets]]`) and the active one; None = manual ticket.
+    pub presets: Vec<Preset>,
+    pub preset: Option<usize>,
+    /// The user asked to edit the presets (the app opens the editor).
+    pub edit_presets: bool,
     next_id: u64,
     requests: HashMap<u64, String>,
     log: VecDeque<(bool, String)>,
@@ -66,6 +120,9 @@ impl Default for Trading {
             next_id: 1,
             requests: HashMap::new(),
             netting: false,
+            presets: Vec::new(),
+            preset: None,
+            edit_presets: false,
             log: VecDeque::new(),
         }
     }
@@ -94,8 +151,14 @@ fn step_decimals(step: f64) -> usize {
     (0..8).find(|&d| ((step * 10f64.powi(d)).round() - step * 10f64.powi(d)).abs() < 1e-9).unwrap_or(8) as usize
 }
 
+/// `v` on the grid of `step`, without float noise (0.3, not 0.30000000000000004): what is sent to
+/// the broker has exactly the step's decimals.
 fn round_to(v: f64, step: f64) -> f64 {
-    if step > 0.0 { (v / step).round() * step } else { v }
+    if step <= 0.0 {
+        return v;
+    }
+    let scale = 10f64.powi(step_decimals(step) as i32);
+    ((v / step).round() * step * scale).round() / scale
 }
 
 impl Trading {
@@ -176,10 +239,8 @@ impl Trading {
             OrderKind::Market => if side == Side::Buy { ask } else { bid },
             _ => price,
         };
-        let dir = if side == Side::Buy { 1.0 } else { -1.0 };
-        let level = |dist: f64, sign: f64| if dist > 0.0 { round_to(entry + sign * dir * dist, spec.tick_size) } else { 0.0 };
-        let (sl, tp) = (level(self.sl_dist, -1.0), level(self.tp_dist, 1.0));
-        let volume = self.volume;
+        let (sl, tp) = self.bracket().levels(side, entry, spec.tick_size);
+        let volume = self.order_volume();
         let vd = step_decimals(spec.vol_step);
         let what = match kind {
             OrderKind::Market => format!("{} {volume:.vd$} {symbol}", side_label(side)),
@@ -203,10 +264,10 @@ impl Trading {
         let mut out = Vec::new();
         let stops = |out: &mut Vec<Level>, ticket: u64, sl: f64, tp: f64| {
             if sl > 0.0 {
-                out.push(Level { price: sl, color: pal.danger, label: format!("SL #{ticket}"), dashed: true, handle: handle(Handle::Sl(ticket)) });
+                out.push(Level { price: sl, color: pal.danger, label: format!("SL #{ticket}"), dashed: true, handle: handle(Handle::Sl(ticket)), side: None });
             }
             if tp > 0.0 {
-                out.push(Level { price: tp, color: pal.ok, label: format!("TP #{ticket}"), dashed: true, handle: handle(Handle::Tp(ticket)) });
+                out.push(Level { price: tp, color: pal.ok, label: format!("TP #{ticket}"), dashed: true, handle: handle(Handle::Tp(ticket)), side: None });
             }
         };
         for p in self.positions.iter().filter(|p| p.symbol == symbol) {
@@ -217,6 +278,7 @@ impl Trading {
                 label: format!("{s} {:.vd$}   {:+.2}", p.volume, p.profit),
                 dashed: false,
                 handle: handle(Handle::Position(p.ticket)),
+                side: Some(p.side),
             });
             stops(&mut out, p.ticket, p.sl, p.tp);
         }
@@ -228,6 +290,7 @@ impl Trading {
                 label: format!("{s} {:.vd$}", o.volume),
                 dashed: true,
                 handle: handle(Handle::Order(o.ticket)),
+                side: None,
             });
             stops(&mut out, o.ticket, o.sl, o.tp);
         }
@@ -239,6 +302,30 @@ impl Trading {
         let tick = self.spec.as_ref()?.tick_size;
         match action {
             ChartAction::Order { side, kind, price } => self.order_at(symbol, side, kind, price),
+            ChartAction::Remove { handle } => match handle {
+                Handle::Order(ticket) => {
+                    self.orders.iter().any(|o| o.ticket == ticket).then_some(())?;
+                    Some(self.request(format!("Cancelar #{ticket}"), |id| Command::Cancel { id, ticket }))
+                }
+                Handle::Sl(t) | Handle::Tp(t) => {
+                    let (entry, sl, tp) = self
+                        .positions
+                        .iter()
+                        .find(|p| p.ticket == t)
+                        .map(|p| (0.0, p.sl, p.tp))
+                        .or_else(|| self.orders.iter().find(|o| o.ticket == t).map(|o| (o.price, o.sl, o.tp)))?;
+                    let is_sl = matches!(handle, Handle::Sl(_));
+                    let (sl, tp) = if is_sl { (0.0, tp) } else { (sl, 0.0) };
+                    let what = format!("Tirar {} #{t}", if is_sl { "stop" } else { "alvo" });
+                    Some(self.request(what, |id| Command::Modify { id, ticket: t, price: entry, sl, tp }))
+                }
+                Handle::Position(ticket) => {
+                    // closing at market; its stop and target belong to the position and go with it
+                    let p = self.positions.iter().find(|p| p.ticket == ticket)?;
+                    let what = format!("Fechar #{ticket} {}", p.symbol);
+                    Some(self.request(what, |id| Command::Close { id, ticket }))
+                }
+            },
             ChartAction::Move { handle, price } => {
                 let price = round_to(price, tick);
                 let (ticket, new_price, sl, tp, what) = match handle {
@@ -272,6 +359,58 @@ impl Trading {
                 Some(self.request(what, |id| Command::Modify { id, ticket, price: new_price, sl, tp }))
             }
         }
+    }
+
+    /// Price step of the chart symbol (0 = unknown).
+    pub fn tick_size(&self) -> f64 {
+        self.spec.as_ref().map(|s| s.tick_size).unwrap_or(0.0)
+    }
+
+    /// The ticket's volume as shown.
+    pub fn volume_text(&self) -> String {
+        let vd = self.spec.as_ref().map(|s| step_decimals(s.vol_step)).unwrap_or(2);
+        format!("{:.vd$}", self.order_volume())
+    }
+
+    fn active(&self) -> Option<&Preset> {
+        self.preset.and_then(|i| self.presets.get(i))
+    }
+
+    pub fn active_name(&self) -> &str {
+        self.active().map(|p| p.name.as_str()).unwrap_or("")
+    }
+
+    /// Volume of the next order: the active preset's (on the symbol's volume grid) or the ticket's.
+    pub fn order_volume(&self) -> f64 {
+        match (self.active(), self.spec.as_ref()) {
+            (Some(p), Some(s)) => round_to(p.volume, s.vol_step).clamp(s.vol_min, s.vol_max),
+            (Some(p), None) => p.volume,
+            (None, _) => self.volume,
+        }
+    }
+
+    /// Stop and target of the next order: the active preset's, or the ticket's distances.
+    pub fn bracket(&self) -> Bracket {
+        match self.active() {
+            Some(p) => {
+                let of = |v: f64| match (v > 0.0, p.unit.as_str()) {
+                    (false, _) => Offset::None,
+                    (true, "points") => Offset::Points(v),
+                    (true, _) => Offset::Percent(v),
+                };
+                Bracket { stop: of(p.stop), target: of(p.target) }
+            }
+            None => {
+                let of = |v: f64| if v > 0.0 { Offset::Points(v) } else { Offset::None };
+                Bracket { stop: of(self.sl_dist), target: of(self.tp_dist) }
+            }
+        }
+    }
+
+    /// New preset list (config reloaded or edited), keeping the active one by name.
+    pub fn set_presets(&mut self, presets: &[Preset], active: &str) {
+        self.presets = presets.to_vec();
+        self.preset = self.presets.iter().position(|p| p.name == active);
     }
 
     /// Net volume of `symbol` (buy positive).
@@ -368,25 +507,56 @@ impl Trading {
         let (vmin, vmax, vstep, tick, digits) = spec_step.unwrap_or((0.01, 100.0, 0.01, 0.01, 2));
         let vd = step_decimals(vstep);
 
-        ui.label(RichText::new("Volume").color(pal.text_dim).size(12.0));
+        ui.label(RichText::new("Operação").color(pal.text_dim).size(12.0));
         ui.horizontal(|ui| {
-            if ui.button("−").clicked() {
-                self.volume -= vstep;
-            }
-            ui.add(egui::DragValue::new(&mut self.volume).speed(vstep).range(vmin..=vmax).fixed_decimals(vd));
-            if ui.button("+").clicked() {
-                self.volume += vstep;
-            }
-        });
-        ui.horizontal(|ui| {
-            for mult in [1.0, 2.0, 5.0, 10.0] {
-                let v = vmin * mult;
-                if ui.small_button(format!("{v:.vd$}")).clicked() {
-                    self.volume = v;
+            let current = self.active().map(|p| p.name.clone()).unwrap_or_else(|| "Manual".into());
+            let width = (ui.available_width() - 60.0).max(80.0);
+            egui::ComboBox::from_id_salt("preset").selected_text(current).width(width).truncate().show_ui(ui, |ui| {
+                if ui.selectable_label(self.preset.is_none(), "Manual").clicked() {
+                    self.preset = None;
                 }
+                for (i, p) in self.presets.iter().enumerate() {
+                    if ui.selectable_label(self.preset == Some(i), &p.name).clicked() {
+                        self.preset = Some(i);
+                    }
+                }
+            });
+            if ui.small_button("Editar").on_hover_text("Criar e editar operações predefinidas").clicked() {
+                self.edit_presets = true;
             }
         });
-        self.volume = round_to(self.volume, vstep).clamp(vmin, vmax);
+        if let Some(p) = self.active() {
+            let b = self.bracket();
+            let text = format!(
+                "{} · stop {} · alvo {}",
+                self.volume_text(),
+                if b.stop == Offset::None { "—".into() } else { b.stop.label('-') },
+                if b.target == Offset::None { "—".into() } else { b.target.label('+') }
+            );
+            ui.label(RichText::new(text).color(pal.accent).size(12.0)).on_hover_text(format!("Operação \"{}\"", p.name));
+        }
+        let manual = self.preset.is_none();
+        ui.add_enabled_ui(manual, |ui| {
+            ui.label(RichText::new("Volume").color(pal.text_dim).size(12.0));
+            ui.horizontal(|ui| {
+                if ui.button("−").clicked() {
+                    self.volume -= vstep;
+                }
+                ui.add(egui::DragValue::new(&mut self.volume).speed(vstep).range(vmin..=vmax).fixed_decimals(vd));
+                if ui.button("+").clicked() {
+                    self.volume += vstep;
+                }
+            });
+            ui.horizontal(|ui| {
+                for mult in [1.0, 2.0, 5.0, 10.0] {
+                    let v = vmin * mult;
+                    if ui.small_button(format!("{v:.vd$}")).clicked() {
+                        self.volume = v;
+                    }
+                }
+            });
+            self.volume = round_to(self.volume, vstep).clamp(vmin, vmax);
+        });
 
         ui.horizontal(|ui| {
             for k in [OrderKind::Market, OrderKind::Limit, OrderKind::Stop] {
@@ -407,13 +577,15 @@ impl Trading {
                 }
             });
         }
-        egui::Grid::new("sltp").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-            for (name, v) in [("Stop (dist.)", &mut self.sl_dist), ("Alvo (dist.)", &mut self.tp_dist)] {
-                ui.label(RichText::new(name).color(pal.text_dim).size(12.0));
-                ui.add(egui::DragValue::new(v).speed(tick * 10.0).range(0.0..=f64::MAX).fixed_decimals(digits as usize))
-                    .on_hover_text("Distância em preço a partir da entrada; 0 = sem");
-                ui.end_row();
-            }
+        ui.add_enabled_ui(manual, |ui| {
+            egui::Grid::new("sltp").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                for (name, v) in [("Stop (dist.)", &mut self.sl_dist), ("Alvo (dist.)", &mut self.tp_dist)] {
+                    ui.label(RichText::new(name).color(pal.text_dim).size(12.0));
+                    ui.add(egui::DragValue::new(v).speed(tick * 10.0).range(0.0..=f64::MAX).fixed_decimals(digits as usize))
+                        .on_hover_text("Distância em preço a partir da entrada; 0 = sem");
+                    ui.end_row();
+                }
+            });
         });
         ui.add_space(6.0);
 
@@ -548,6 +720,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn grid_rounding_has_no_float_noise() {
+        assert_eq!(round_to(0.3, 0.1), 0.3);
+        assert_eq!(round_to(0.24, 0.1), 0.2);
+        assert_eq!(round_to(31234.567, 0.01), 31234.57);
+        assert_eq!(round_to(100.13, 0.25), 100.25);
+    }
+
+    #[test]
     fn decimals_of_steps() {
         assert_eq!(step_decimals(0.01), 2);
         assert_eq!(step_decimals(1.0), 0);
@@ -603,6 +783,35 @@ mod tests {
         };
         assert_eq!((side, kind, price, volume), (Side::Buy, OrderKind::Limit, 98.0, 0.1));
         assert!(t.chart_action(ChartAction::Move { handle: Handle::Order(99), price: 1.0 }, "X").is_none());
+        // the × of a line: cancel the order, or drop only that stop/target
+        assert!(matches!(t.chart_action(ChartAction::Remove { handle: Handle::Order(8) }, "X"), Some(Command::Cancel { ticket: 8, .. })));
+        assert_eq!(modify(t.chart_action(ChartAction::Remove { handle: Handle::Tp(8) }, "X")), (8, 103.0, 105.0, 0.0));
+        assert_eq!(modify(t.chart_action(ChartAction::Remove { handle: Handle::Tp(7) }, "X")), (7, 0.0, 0.0, 0.0));
+        assert!(matches!(t.chart_action(ChartAction::Remove { handle: Handle::Position(7) }, "X"), Some(Command::Close { ticket: 7, .. })));
+        assert!(t.chart_action(ChartAction::Remove { handle: Handle::Position(70) }, "X").is_none());
+    }
+
+    #[test]
+    fn preset_sets_volume_and_bracket() {
+        let mut t = with_book(true);
+        let presets = vec![
+            Preset { name: "P".into(), volume: 0.24, stop: 0.2, target: 0.4, unit: "percent".into() },
+            Preset { name: "Q".into(), volume: 0.3, stop: 10.0, target: 0.0, unit: "points".into() },
+        ];
+        t.set_presets(&presets, "P");
+        assert_eq!(t.active_name(), "P");
+        // 0.24 on a 0.1 grid -> 0.2; buy limit at 100: stop 0.20% below, target 0.40% above, on 0.25 ticks
+        let Some(Command::Order { volume, sl, tp, .. }) = t.chart_action(ChartAction::Order { side: Side::Buy, kind: OrderKind::Limit, price: 100.0 }, "X") else { panic!() };
+        assert!((volume - 0.2).abs() < 1e-9);
+        assert_eq!((sl, tp), (99.75, 100.5));
+        // a sell mirrors it; points preset without target
+        t.set_presets(&presets, "Q");
+        let Some(Command::Order { sl, tp, volume, .. }) = t.chart_action(ChartAction::Order { side: Side::Sell, kind: OrderKind::Limit, price: 100.0 }, "X") else { panic!() };
+        assert_eq!((sl, tp, volume), (110.0, 0.0, 0.3));
+        assert_eq!(t.bracket().stop.label('-'), "-10 pts");
+        // a preset that disappeared falls back to manual
+        t.set_presets(&presets[..1], "Q");
+        assert!(t.preset.is_none());
     }
 
     #[test]

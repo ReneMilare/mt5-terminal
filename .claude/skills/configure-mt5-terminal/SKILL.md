@@ -25,7 +25,12 @@ salvar. Para ações imediatas existe `mt5-terminal ctl`, como o `hyprctl` do Hy
 | `chart.first_bars` | candles do primeiro bloco (100–20000); mais antigos vêm conforme o usuário volta no tempo |
 | `mt5.auto_start` | abrir o MetaTrader 5 junto se ele estiver fechado |
 | `mt5.command` | comando que abre o MT5 (lista); vazio = como o atalho do MT5 |
-| `colors.up/down/background/grid/text/accent` | `"#rrggbb"` |
+| `colors.background/panel/grid/text/accent` | `"#rrggbb"`: fundo do gráfico, painéis, grade, texto, destaque |
+| `colors.up/down` | alta/baixa (botões, preço, volume) |
+| `colors.candle_up/candle_down`, `colors.wick_up/wick_down` | corpo e contorno/pavio dos candles; corpo da cor do fundo = vazado |
+| `[[presets]]` | `name`, `volume`, `stop`, `target` (0 = sem), `unit` (`percent` da entrada ou `points`): operações predefinidas da boleta |
+| `ticket.preset` | nome da operação ativa; vazio = Manual |
+| `[[accounts]]` | `name`, `login`, `server`, `kind` (`demo`/`real`): contas da troca pela barra de status; o app as anota sozinho; **nunca** grave senha |
 
 O app relê o arquivo em até meio segundo enquanto a janela está sendo desenhada; com a janela num
 workspace escondido, aplica quando ela voltar a aparecer.
@@ -42,7 +47,7 @@ Respondem na hora mesmo com a janela escondida. Saída `erro: ...` (código 1) e
 
 ## Limites
 
-- `ctl` e o arquivo **não enviam ordens**, por desenho. Operar é com o usuário, na boleta ou no
+- `ctl` e o arquivo **não enviam ordens** nem trocam de conta, por desenho (a troca é na barra de status, e para REAL pede confirmação). Operar é com o usuário, na boleta ou no
   gráfico do app.
 - O app tem uma instância só; se `ctl` disser que ele não está aberto, peça ao usuário para abri-lo
   (ou rode `mt5-terminal`, que também abre o MT5 se `mt5.auto_start`).

@@ -1,4 +1,4 @@
-//! Colors and egui style. One dark theme for now.
+//! Colors and egui style. The palette comes from `[colors]` of the config (Colors window).
 
 use eframe::egui::{self, Color32, CornerRadius, Stroke};
 
@@ -15,6 +15,11 @@ pub struct Palette {
     pub accent: Color32,
     pub up: Color32,
     pub down: Color32,
+    /// Candle bodies and their outline/wick (MT5: bull/bear candle, bar up/down).
+    pub candle_up: Color32,
+    pub candle_down: Color32,
+    pub wick_up: Color32,
+    pub wick_down: Color32,
     pub up_vol: Color32,
     pub down_vol: Color32,
     pub ok: Color32,
@@ -38,6 +43,10 @@ impl Default for Palette {
             accent: rgb(59, 130, 246),
             up: rgb(38, 166, 154),
             down: rgb(239, 83, 80),
+            candle_up: rgb(38, 166, 154),
+            candle_down: rgb(239, 83, 80),
+            wick_up: rgb(38, 166, 154),
+            wick_down: rgb(239, 83, 80),
             up_vol: Color32::from_rgba_unmultiplied(38, 166, 154, 60),
             down_vol: Color32::from_rgba_unmultiplied(239, 83, 80, 60),
             ok: rgb(34, 197, 94),
@@ -51,7 +60,9 @@ pub fn apply(ctx: &egui::Context, pal: &Palette) {
     // same look whatever the system theme is
     ctx.all_styles_mut(|style| {
         let v = &mut style.visuals;
-        *v = egui::Visuals::dark();
+        // light or dark widgets by how light the panels are
+        let light = pal.panel_bg.r() as u32 + pal.panel_bg.g() as u32 + pal.panel_bg.b() as u32 > 3 * 140;
+        *v = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
         v.panel_fill = pal.panel_bg;
         v.window_fill = pal.panel_bg;
         v.extreme_bg_color = pal.app_bg;

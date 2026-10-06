@@ -37,15 +37,59 @@ auto_start = true
 # Exemplo: ["env", "WINEPREFIX=/home/voce/.mt5", "wine", "C:\\Program Files\\MetaTrader 5\\terminal64.exe"]
 command = []
 
+[ticket]
+# Operação predefinida ativa na boleta (nome de uma das [[presets]] abaixo); vazio = Manual.
+preset = ""
+
+# Operações predefinidas (também pela boleta: "Operação" → Editar). Com Shift/Ctrl segurado no gráfico,
+# a ordem que acompanha o ponteiro já leva o volume, o stop e o alvo da operação ativa.
+# unit: "percent" (% do preço de entrada) ou "points" (distância em preço). 0 = sem stop/alvo.
+# [[presets]]
+# name = "0.2 · 0,20% / 0,40%"
+# volume = 0.2
+# stop = 0.20
+# target = 0.40
+# unit = "percent"
+
+# Contas para trocar pela barra de status. O app anota sozinho cada conta em que o MT5 conectar;
+# a senha nunca fica aqui: o MT5 usa a que você salvou nele. kind: "demo", "real" ou "contest".
+# [[accounts]]
+# name = "Demo"
+# login = 1234567
+# server = "Corretora-Demo"
+# kind = "demo"
+
 [colors]
-# Cores em "#rrggbb".
-up = "#26a69a"
-down = "#ef5350"
-background = "#0d1117"
+# Cores em "#rrggbb" (também pela janela Cores do app, com predefinições).
+background = "#0d1117"   # fundo do gráfico
+panel = "#0f131a"        # barras e boleta
 grid = "#191f29"
 text = "#d6dce6"
-accent = "#3b82f6"
+accent = "#3b82f6"       # destaques e seleção
+up = "#26a69a"           # alta: botões, preço, volume
+down = "#ef5350"         # baixa
+# Candles como no MT5: corpo ("Bull/Bear candle") e contorno/pavio ("Bar up/down").
+# Corpo diferente do contorno desenha o candle com borda (corpo da cor do fundo = candle vazado).
+candle_up = "#26a69a"
+candle_down = "#ef5350"
+wick_up = "#26a69a"
+wick_down = "#ef5350"
 "##;
+
+/// Every color the user picks: key in `[colors]` and its name in the Colors window.
+pub const COLOR_KEYS: [(&str, &str); 11] = [
+    ("background", "Fundo do gráfico"),
+    ("panel", "Painéis (barras e boleta)"),
+    ("grid", "Grade"),
+    ("text", "Texto"),
+    ("accent", "Destaque"),
+    ("up", "Alta (botões, preço, volume)"),
+    ("down", "Baixa"),
+    ("candle_up", "Corpo do candle de alta"),
+    ("candle_down", "Corpo do candle de baixa"),
+    ("wick_up", "Contorno e pavio de alta"),
+    ("wick_down", "Contorno e pavio de baixa"),
+];
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Chart {
@@ -66,12 +110,125 @@ pub struct Mt5 {
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Colors {
-    pub up: String,
-    pub down: String,
     pub background: String,
+    pub panel: String,
     pub grid: String,
     pub text: String,
     pub accent: String,
+    pub up: String,
+    pub down: String,
+    pub candle_up: String,
+    pub candle_down: String,
+    pub wick_up: String,
+    pub wick_down: String,
+}
+
+impl Colors {
+    pub fn get(&self, key: &str) -> &str {
+        match key {
+            "background" => &self.background,
+            "panel" => &self.panel,
+            "grid" => &self.grid,
+            "text" => &self.text,
+            "accent" => &self.accent,
+            "up" => &self.up,
+            "down" => &self.down,
+            "candle_up" => &self.candle_up,
+            "candle_down" => &self.candle_down,
+            "wick_up" => &self.wick_up,
+            "wick_down" => &self.wick_down,
+            _ => "",
+        }
+    }
+
+    pub fn set(&mut self, key: &str, value: String) {
+        let slot = match key {
+            "background" => &mut self.background,
+            "panel" => &mut self.panel,
+            "grid" => &mut self.grid,
+            "text" => &mut self.text,
+            "accent" => &mut self.accent,
+            "up" => &mut self.up,
+            "down" => &mut self.down,
+            "candle_up" => &mut self.candle_up,
+            "candle_down" => &mut self.candle_down,
+            "wick_up" => &mut self.wick_up,
+            "wick_down" => &mut self.wick_down,
+            _ => return,
+        };
+        *slot = value;
+    }
+
+    pub fn color(&self, key: &str) -> Color32 {
+        hex(self.get(key)).unwrap_or(Color32::MAGENTA)
+    }
+}
+
+/// Ready-made schemes for the Colors window: (name, colors).
+pub fn presets() -> Vec<(&'static str, Colors)> {
+    let c = |v: [&str; 11]| Colors {
+        background: v[0].into(),
+        panel: v[1].into(),
+        grid: v[2].into(),
+        text: v[3].into(),
+        accent: v[4].into(),
+        up: v[5].into(),
+        down: v[6].into(),
+        candle_up: v[7].into(),
+        candle_down: v[8].into(),
+        wick_up: v[9].into(),
+        wick_down: v[10].into(),
+    };
+    vec![
+        ("Padrão escuro", Settings::default().colors),
+        // MT5's default "Green on Black": hollow bull candles, white bear bodies, lime bars
+        ("MetaTrader clássico", c(["#000000", "#101010", "#2f3a45", "#ffffff", "#1e90ff", "#00ff00", "#ff3030", "#000000", "#ffffff", "#00ff00", "#00ff00"])),
+        ("Claro", c(["#ffffff", "#f3f4f6", "#e5e7eb", "#111827", "#2563eb", "#089981", "#f23645", "#089981", "#f23645", "#089981", "#f23645"])),
+        ("TradingView", c(["#131722", "#1e222d", "#232837", "#d1d4dc", "#2962ff", "#089981", "#f23645", "#089981", "#f23645", "#089981", "#f23645"])),
+    ]
+}
+
+pub fn color_hex(c: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Account {
+    pub name: String,
+    pub login: i64,
+    pub server: String,
+    pub kind: String,
+}
+
+impl Account {
+    pub fn is_real(&self) -> bool {
+        self.kind == "real"
+    }
+}
+
+/// A ready-made order: volume and stop/target distances from the entry.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Preset {
+    pub name: String,
+    pub volume: f64,
+    #[serde(default)]
+    pub stop: f64,
+    #[serde(default)]
+    pub target: f64,
+    /// "percent" of the entry price, or "points" (price distance).
+    #[serde(default = "percent")]
+    pub unit: String,
+}
+
+fn percent() -> String {
+    "percent".into()
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Ticket {
+    /// Active preset by name; empty = manual.
+    #[serde(default)]
+    pub preset: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -79,6 +236,12 @@ pub struct Settings {
     pub chart: Chart,
     pub mt5: Mt5,
     pub colors: Colors,
+    #[serde(default)]
+    pub accounts: Vec<Account>,
+    #[serde(default)]
+    pub ticket: Ticket,
+    #[serde(default)]
+    pub presets: Vec<Preset>,
 }
 
 impl Default for Settings {
@@ -141,7 +304,10 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
     let user: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
     let mut merged: toml::Table = DEFAULT_TOML.parse().expect("DEFAULT_TOML is valid");
     let mut warnings = Vec::new();
-    unknown_keys(&user, &merged, "", &mut warnings);
+    let mut known = merged.clone();
+    known.insert("accounts".into(), toml::Value::Array(Vec::new()));
+    known.insert("presets".into(), toml::Value::Array(Vec::new()));
+    unknown_keys(&user, &known, "", &mut warnings);
     let warnings_unknown: Vec<String> = warnings.drain(..).map(|k| format!("chave desconhecida: {k}")).collect();
     for (section, value) in user {
         match (merged.get_mut(&section), value) {
@@ -169,10 +335,22 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
     if !s.chart.symbols.contains(&s.chart.symbol) {
         s.chart.symbols.insert(0, s.chart.symbol.clone());
     }
-    let c = &s.colors;
-    for (name, v) in [("up", &c.up), ("down", &c.down), ("background", &c.background), ("grid", &c.grid), ("text", &c.text), ("accent", &c.accent)] {
+    for p in &s.presets {
+        if p.unit != "percent" && p.unit != "points" {
+            return Err(format!("presets \"{}\": unit = {:?}: use \"percent\" ou \"points\"", p.name, p.unit));
+        }
+        if p.volume.is_nan() || p.volume <= 0.0 || p.stop < 0.0 || p.target < 0.0 {
+            return Err(format!("presets \"{}\": volume > 0 e stop/target >= 0", p.name));
+        }
+    }
+    if !s.ticket.preset.is_empty() && !s.presets.iter().any(|p| p.name == s.ticket.preset) {
+        warnings.push(format!("ticket.preset = {:?} não existe em [[presets]]; usando Manual", s.ticket.preset));
+        s.ticket.preset.clear();
+    }
+    for (key, _) in COLOR_KEYS {
+        let v = s.colors.get(key);
         if hex(v).is_none() {
-            return Err(format!("colors.{name} = {v:?}: use \"#rrggbb\""));
+            return Err(format!("colors.{key} = {v:?}: use \"#rrggbb\""));
         }
     }
     Ok((s, warnings))
@@ -207,17 +385,23 @@ impl Settings {
     pub fn palette(&self) -> Palette {
         let c = &self.colors;
         let mut p = Palette::default();
-        let set = |dst: &mut Color32, v: &str| {
-            if let Some(color) = hex(v) {
-                *dst = color;
-            }
-        };
-        set(&mut p.up, &c.up);
-        set(&mut p.down, &c.down);
-        set(&mut p.chart_bg, &c.background);
-        set(&mut p.grid, &c.grid);
-        set(&mut p.text, &c.text);
-        set(&mut p.accent, &c.accent);
+        p.chart_bg = c.color("background");
+        p.panel_bg = c.color("panel");
+        p.app_bg = c.color("panel");
+        p.grid = c.color("grid");
+        p.text = c.color("text");
+        // secondary text and tags follow the text and panel colors, so light themes stay readable
+        p.text_dim = p.text.lerp_to_gamma(p.panel_bg, 0.4);
+        p.tag_bg = p.panel_bg.lerp_to_gamma(p.text, 0.18);
+        p.border = p.panel_bg.lerp_to_gamma(p.text, 0.12);
+        p.crosshair = p.text.lerp_to_gamma(p.chart_bg, 0.4);
+        p.accent = c.color("accent");
+        p.up = c.color("up");
+        p.down = c.color("down");
+        p.candle_up = c.color("candle_up");
+        p.candle_down = c.color("candle_down");
+        p.wick_up = c.color("wick_up");
+        p.wick_down = c.color("wick_down");
         p.up_vol = Color32::from_rgba_unmultiplied(p.up.r(), p.up.g(), p.up.b(), 60);
         p.down_vol = Color32::from_rgba_unmultiplied(p.down.r(), p.down.g(), p.down.b(), 60);
         p
@@ -233,6 +417,89 @@ fn edit_chart(f: impl FnOnce(&mut toml_edit::Item)) -> std::io::Result<()> {
         doc["chart"] = toml_edit::table();
     }
     f(&mut doc["chart"]);
+    std::fs::write(p, doc.to_string())
+}
+
+/// Note an account the MT5 connected to, once (by login and server). Keeps the file's comments.
+pub fn remember_account(login: i64, server: &str, kind: &str) -> std::io::Result<bool> {
+    let p = Settings::init()?;
+    let text = std::fs::read_to_string(&p)?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(std::io::Error::other)?;
+    let known = doc
+        .get("accounts")
+        .and_then(|a| a.as_array_of_tables())
+        .is_some_and(|t| t.iter().any(|a| a.get("login").and_then(|v| v.as_integer()) == Some(login) && a.get("server").and_then(|v| v.as_str()) == Some(server)));
+    if known {
+        return Ok(false);
+    }
+    let name = match kind {
+        "real" => "Real",
+        "contest" => "Concurso",
+        _ => "Demo",
+    };
+    let mut t = toml_edit::Table::new();
+    t["name"] = toml_edit::value(format!("{name} {login}"));
+    t["login"] = toml_edit::value(login);
+    t["server"] = toml_edit::value(server);
+    t["kind"] = toml_edit::value(kind);
+    match doc.get_mut("accounts").and_then(|a| a.as_array_of_tables_mut()) {
+        Some(a) => a.push(t),
+        None => {
+            let mut a = toml_edit::ArrayOfTables::new();
+            a.push(t);
+            doc.insert("accounts", toml_edit::Item::ArrayOfTables(a));
+        }
+    }
+    std::fs::write(p, doc.to_string())?;
+    Ok(true)
+}
+
+/// Write the presets and the active one (the `[[presets]]` tables are rewritten; other comments kept).
+pub fn save_presets(presets: &[Preset], active: &str) -> std::io::Result<()> {
+    let p = Settings::init()?;
+    let text = std::fs::read_to_string(&p)?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(std::io::Error::other)?;
+    if !doc.contains_table("ticket") {
+        doc["ticket"] = toml_edit::table();
+    }
+    doc["ticket"]["preset"] = toml_edit::value(active);
+    let mut tables = toml_edit::ArrayOfTables::new();
+    for pr in presets {
+        let mut t = toml_edit::Table::new();
+        t["name"] = toml_edit::value(pr.name.as_str());
+        t["volume"] = toml_edit::value(pr.volume);
+        t["stop"] = toml_edit::value(pr.stop);
+        t["target"] = toml_edit::value(pr.target);
+        t["unit"] = toml_edit::value(pr.unit.as_str());
+        tables.push(t);
+    }
+    if presets.is_empty() {
+        doc.remove("presets");
+    } else {
+        doc.insert("presets", toml_edit::Item::ArrayOfTables(tables));
+    }
+    std::fs::write(p, doc.to_string())
+}
+
+/// Write `[colors]` in place (comments kept).
+pub fn save_colors(colors: &Colors) -> std::io::Result<()> {
+    let p = Settings::init()?;
+    let text = std::fs::read_to_string(&p)?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(std::io::Error::other)?;
+    if !doc.contains_table("colors") {
+        doc["colors"] = toml_edit::table();
+    }
+    for (key, _) in COLOR_KEYS {
+        // keep the comment that follows a value on the same line
+        match doc["colors"].get_mut(key).and_then(|i| i.as_value_mut()) {
+            Some(v) => {
+                let decor = v.decor().clone();
+                *v = toml_edit::Value::from(colors.get(key));
+                *v.decor_mut() = decor;
+            }
+            None => doc["colors"][key] = toml_edit::value(colors.get(key)),
+        }
+    }
     std::fs::write(p, doc.to_string())
 }
 
@@ -266,6 +533,24 @@ mod tests {
         assert_eq!(s.chart.layers, [Layer::Levels, Layer::Trades, Layer::Price, Layer::Indicators]);
         assert!(w.iter().any(|x| x.contains("chart.colour")), "{w:?}");
         assert!(parse("[colors]\nup = \"green\"\n").unwrap_err().contains("colors.up"));
+        // an old file with only the first colors gets the candle defaults
+        let (s, _) = parse("[colors]\nup = \"#00ff00\"\n").unwrap();
+        assert_eq!((s.colors.up.as_str(), s.colors.candle_up.as_str()), ("#00ff00", "#26a69a"));
+        for (name, c) in presets() {
+            for (key, _) in COLOR_KEYS {
+                assert!(hex(c.get(key)).is_some(), "{name}: {key}");
+            }
+        }
+        assert_eq!(color_hex(Color32::from_rgb(1, 2, 255)), "#0102ff");
+        let (s, w) = parse("[ticket]\npreset = \"P\"\n[[presets]]\nname = \"P\"\nvolume = 0.2\nstop = 0.2\ntarget = 0.4\n").unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!((s.presets[0].unit.as_str(), s.ticket.preset.as_str()), ("percent", "P"));
+        assert!(parse("[[presets]]\nname = \"X\"\nvolume = 1\nunit = \"pips\"\n").is_err());
+        let (s, w) = parse("[ticket]\npreset = \"nada\"\n").unwrap();
+        assert!(s.ticket.preset.is_empty() && !w.is_empty());
         assert!(parse("[chart\n").is_err());
+        let (s, w) = parse("[[accounts]]\nname = \"Real\"\nlogin = 1\nserver = \"S\"\nkind = \"real\"\n").unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert!(s.accounts[0].is_real());
     }
 }
