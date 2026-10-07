@@ -14,8 +14,9 @@ use eframe::egui::{
 
 const PRICE_AXIS_W: f32 = 76.0;
 const TIME_AXIS_H: f32 = 26.0;
-/// Height of the indicator pane under the price plot.
+/// Height of the indicator pane under the price plot, and of its minimized strip.
 const PANE_H: f32 = 170.0;
+const PANE_MIN_H: f32 = 20.0;
 /// Empty bars kept to the right of the last bar when following the market.
 const RIGHT_PAD: f64 = 6.0;
 const MIN_BAR_PX: f32 = 1.0;
@@ -37,6 +38,149 @@ enum Zone {
     TimeAxis,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorMode {
+    Arrow,
+    #[default]
+    Hand,
+    Cross,
+}
+
+impl CursorMode {
+    pub const ALL: [Self; 3] = [Self::Arrow, Self::Hand, Self::Cross];
+
+    pub fn key(self) -> &'static str {
+        match self { Self::Arrow => "arrow", Self::Hand => "hand", Self::Cross => "cross" }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self { Self::Arrow => "Seta", Self::Hand => "Mão", Self::Cross => "Cruz" }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Arrow => "Seta: apontar e selecionar, sem arrastar o gráfico",
+            Self::Hand => "Mão: clique e arraste para mover o gráfico",
+            Self::Cross => {
+                "Cruz: clique e arraste para medir porcentagem e barras. Esc limpa a medição"
+            }
+        }
+    }
+
+    /// Vector icons stay sharp at any display scale and do not depend on font glyphs.
+    pub fn button(self, ui: &mut Ui, selected: bool) -> egui::Response {
+        let response = ui.add(egui::Button::selectable(selected, "").min_size(Vec2::splat(28.0)));
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                ui.is_enabled(),
+                selected,
+                self.label(),
+            )
+        });
+        if ui.is_rect_visible(response.rect) {
+            let color = ui
+                .style()
+                .interact_selectable(&response, selected)
+                .fg_stroke
+                .color;
+            let stroke = Stroke::new(1.5, color);
+            let at = |x: f32, y: f32| response.rect.center() + Vec2::new(x - 10.0, y - 10.0);
+            match self {
+                Self::Arrow => {
+                    let points = [
+                        (3.0, 2.0),
+                        (3.0, 17.0),
+                        (7.0, 13.0),
+                        (10.0, 19.0),
+                        (13.0, 17.5),
+                        (10.0, 11.5),
+                        (16.0, 11.5),
+                    ];
+                    ui.painter().add(Shape::closed_line(
+                        points.into_iter().map(|(x, y)| at(x, y)).collect(),
+                        stroke,
+                    ));
+                }
+                Self::Hand => {
+                    let points = [
+                        (6.0, 12.0),
+                        (6.0, 5.0),
+                        (7.0, 4.0),
+                        (8.0, 5.0),
+                        (8.0, 10.0),
+                        (8.0, 2.0),
+                        (9.0, 1.0),
+                        (10.0, 2.0),
+                        (10.0, 10.0),
+                        (10.0, 3.0),
+                        (11.0, 2.0),
+                        (12.0, 3.0),
+                        (12.0, 10.0),
+                        (12.0, 5.0),
+                        (13.0, 4.0),
+                        (14.0, 5.0),
+                        (14.0, 13.0),
+                        (13.0, 17.0),
+                        (11.0, 19.0),
+                        (7.0, 19.0),
+                        (5.0, 17.0),
+                        (2.0, 12.0),
+                        (2.0, 10.0),
+                        (3.0, 9.0),
+                        (4.0, 10.0),
+                    ];
+                    ui.painter().add(Shape::closed_line(
+                        points.into_iter().map(|(x, y)| at(x, y)).collect(),
+                        stroke,
+                    ));
+                }
+                Self::Cross => {
+                    for (a, b) in [
+                        ((10.0, 1.0), (10.0, 6.0)),
+                        ((10.0, 14.0), (10.0, 19.0)),
+                        ((1.0, 10.0), (6.0, 10.0)),
+                        ((14.0, 10.0), (19.0, 10.0)),
+                    ] {
+                        ui.painter()
+                            .line_segment([at(a.0, a.1), at(b.0, b.1)], stroke);
+                    }
+                    ui.painter().circle_stroke(at(10.0, 10.0), 3.0, stroke);
+                }
+            }
+        }
+        response.on_hover_text(self.hint())
+    }
+
+    fn icon(self) -> CursorIcon {
+        match self { Self::Arrow => CursorIcon::Default, Self::Hand => CursorIcon::Grab, Self::Cross => CursorIcon::Crosshair }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MeasurePoint {
+    bar: usize,
+    price: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Measurement {
+    start: MeasurePoint,
+    end: MeasurePoint,
+}
+
+impl Measurement {
+    fn percent(self) -> Option<f64> {
+        let percent = (self.end.price - self.start.price) / self.start.price * 100.0;
+        percent.is_finite().then_some(percent)
+    }
+
+    fn bars(self) -> usize {
+        self.end.bar.abs_diff(self.start.bar)
+    }
+}
+
 pub struct ChartView {
     right: f64,
     bar_px: f32,
@@ -45,6 +189,9 @@ pub struct ChartView {
     y_hi: f64,
     drag: Option<Zone>,
     drag_dy: f32,
+    cursor: CursorMode,
+    measurement: Option<Measurement>,
+    measuring: bool,
     follow: bool,
     known_len: usize,
     /// Time of the oldest bar seen, to keep the view still when older history is loaded in front.
@@ -78,6 +225,8 @@ pub enum ChartAction {
     Move { handle: Handle, price: f64 },
     /// The × of a line (or Delete over it): close the position, cancel the order, or drop that stop/target.
     Remove { handle: Handle },
+    /// Minimize or restore the indicator pane.
+    TogglePane,
     /// New pending order from the context menu.
     Order { side: Side, kind: OrderKind, price: f64 },
 }
@@ -92,6 +241,9 @@ impl Default for ChartView {
             y_hi: 1.0,
             drag: None,
             drag_dy: 0.0,
+            cursor: CursorMode::default(),
+            measurement: None,
+            measuring: false,
             follow: true,
             known_len: 0,
             known_first: 0,
@@ -118,16 +270,39 @@ pub struct ChartData<'a> {
     pub map_levels: &'a [MapLevel],
     /// Indicator pane under the price plot.
     pub pane: Option<&'a Pane<'a>>,
+    /// The pane is shown (false: a thin strip that restores it).
+    pub pane_open: bool,
     /// Drawing order of the plot's layers, back to front.
     pub layers: &'a [Layer],
-    /// Bid/ask of the symbol, to tell limit from stop in the context menu (None: no menu).
+    /// Live bid/ask of the symbol, also shown while trading is locked.
     pub quote: Option<(f64, f64)>,
+    /// Order previews and the context menu require the same permission as the ticket.
+    pub can_trade: bool,
+    pub cursor: CursorMode,
     /// Price step of the symbol (the order following the pointer shows the price it will get).
     pub tick: f64,
     /// Volume of the ticket, shown on the order following the pointer.
     pub order_volume: &'a str,
     /// Stop and target of the next order, drawn with the order following the pointer.
     pub bracket: Option<crate::trading::Bracket>,
+    /// Replaces the volume band at the bottom of the plot (e.g. volume delta).
+    pub volume: Option<VolumeBand<'a>>,
+    /// A small mark per bar at a price (e.g. the bar's POC), drawn over the candles.
+    pub marks: Option<Marks<'a>>,
+}
+
+/// One discreet mark per bar: a short horizontal dash at `prices[i]` (NaN = none), sized by the zoom.
+pub struct Marks<'a> {
+    pub prices: &'a [f64],
+    pub color: Color32,
+}
+
+/// Values drawn in the volume band instead of the volume, the same way: bars up from the bottom,
+/// height |value| on the visible maximum, color by sign (`palette`: positive, negative, zero).
+pub struct VolumeBand<'a> {
+    /// One value per bar (NaN = none).
+    pub values: &'a [f64],
+    pub palette: [Color32; 3],
 }
 
 /// Lines with a × to remove them: every trade line (a position's × closes it).
@@ -139,7 +314,7 @@ fn removable(_h: Handle) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Layer {
-    /// Candles and the last price line.
+    /// Candles and the bid/ask lines and price tags.
     Price,
     /// Indicator lines over the candles.
     Indicators,
@@ -197,6 +372,8 @@ pub struct MapLevel {
     pub width: f32,
     pub dashed: bool,
     pub text: String,
+    /// Complete sources, even when the on-chart label is shortened.
+    pub details: String,
 }
 
 /// One strip of the pane: a class per bar (`u8::MAX` = nothing) and the color of each class.
@@ -258,23 +435,40 @@ impl Frame {
 impl ChartView {
     /// Forget the view (new symbol or timeframe): follow the last bar with auto-scale.
     pub fn reset(&mut self) {
-        *self = Self { bar_px: self.bar_px, ..Self::default() };
+        *self = Self { bar_px: self.bar_px, cursor: self.cursor, ..Self::default() };
+    }
+
+    fn set_cursor(&mut self, cursor: CursorMode) {
+        if self.cursor != cursor {
+            self.cursor = cursor;
+            self.measurement = None;
+            self.measuring = false;
+            self.drag = None;
+            self.level_drag = None;
+        }
     }
 
     pub fn ui(&mut self, ui: &mut Ui, data: &ChartData, pal: &Palette) {
+        self.set_cursor(data.cursor);
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let ppp = ui.ctx().pixels_per_point();
         painter.rect_filled(rect, 0.0, pal.chart_bg);
 
-        let pane_h = if data.pane.is_some() { PANE_H.min(rect.height() * 0.4) } else { 0.0 };
+        let pane_h = match (data.pane.is_some(), data.pane_open) {
+            (false, _) => 0.0,
+            (true, true) => PANE_H.min(rect.height() * 0.4),
+            (true, false) => PANE_MIN_H,
+        };
         let plot = Rect::from_min_max(rect.min, Pos2::new(rect.right() - PRICE_AXIS_W, rect.bottom() - TIME_AXIS_H - pane_h));
         let pane_rect = Rect::from_min_max(Pos2::new(rect.left(), plot.bottom()), Pos2::new(plot.right(), plot.bottom() + pane_h));
         let price_axis = Rect::from_min_max(Pos2::new(plot.right(), rect.top()), Pos2::new(rect.right(), plot.bottom()));
         let time_axis = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - TIME_AXIS_H), rect.max);
 
         let bars = &data.series.bars;
+        let quote = valid_quote(data.quote);
+        let trade_quote = quote.filter(|_| data.can_trade);
         let n = bars.len();
         if n == 0 {
             painter.text(plot.center(), Align2::CENTER_CENTER, "Aguardando dados…", FontId::proportional(15.0), pal.text_dim);
@@ -286,13 +480,17 @@ impl ChartView {
             let added = bars.partition_point(|b| b.time < self.known_first);
             self.right += added as f64;
             self.known_len += added;
+            if let Some(m) = &mut self.measurement {
+                m.start.bar += added;
+                m.end.bar += added;
+            }
         }
         self.known_first = bars[0].time;
 
         // --- keep following the market when new bars arrive -------------------------------------
         if self.known_len == 0 {
             self.right = n as f64 - 1.0 + RIGHT_PAD;
-        } else if n > self.known_len && self.follow {
+        } else if n > self.known_len && self.follow && !self.measuring {
             self.right += (n - self.known_len) as f64;
         }
         self.known_len = n;
@@ -325,9 +523,12 @@ impl ChartView {
                 .map(|(h, _)| h)
         };
         let grab = |p: Pos2| grab_within(p, GRAB_PX);
-        // trade lines drag only with Alt held; without it a drag always pans the chart
+        // Alt dragging edits trades; otherwise the selected cursor controls plot gestures.
         let alt = ui.input(|i| i.modifiers.alt);
-        let alt_grab = |p: Pos2| if alt { grab_within(p, ALT_GRAB_PX) } else { None };
+        let alt_grab = |p: Pos2| {
+            if alt { grab_within(p, ALT_GRAB_PX) } else { None
+            }
+        };
         // the × of a removable line under the pointer
         let remove_at = |p: Pos2| -> Option<Handle> {
             if p.x < plot.left() + REMOVE_X || p.x > plot.left() + REMOVE_X + REMOVE_W {
@@ -335,7 +536,9 @@ impl ChartView {
             }
             data.levels
                 .iter()
-                .filter_map(|l| l.handle.filter(|h| removable(*h)).map(|h| (h, (y_at(l.price) - p.y).abs())))
+                .filter_map(|l| {
+                    l.handle.filter(|h| removable(*h)).map(|h| (h, (y_at(l.price) - p.y).abs()))
+                })
                 .filter(|(_, d)| *d <= REMOVE_W / 2.0)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(h, _)| h)
@@ -347,9 +550,12 @@ impl ChartView {
             (false, true) => Some(Side::Sell),
             _ => None,
         };
-        let snap_price = |price: f64| if data.tick > 0.0 { (price / data.tick).round() * data.tick } else { price };
-        let ghost = match (ghost_side, hover.filter(|p| plot.contains(*p)), data.quote) {
-            (Some(side), Some(p), Some((bid, ask))) if self.level_drag.is_none() && self.drag.is_none() => {
+        let snap_price = |price: f64| {
+            if data.tick > 0.0 { (price / data.tick).round() * data.tick } else { price
+            }
+        };
+        let ghost = match (ghost_side, hover.filter(|p| plot.contains(*p)), trade_quote) {
+            (Some(side), Some(p), Some((bid, ask))) if self.level_drag.is_none() && self.drag.is_none() && !self.measuring => {
                 let price = snap_price(price_at(p.y));
                 let kind = match side {
                     Side::Buy if price < ask => OrderKind::Limit,
@@ -368,31 +574,69 @@ impl ChartView {
         if let Some(p) = hover {
             ui.ctx().set_cursor_icon(match zone_at(p) {
                 _ if self.level_drag.is_some() => CursorIcon::Grabbing,
-                _ if remove_at(p).is_some() => CursorIcon::PointingHand,
+                _ if remove_at(p).is_some() && self.cursor != CursorMode::Cross => {
+                    CursorIcon::PointingHand
+                }
                 _ if ghost.is_some() => CursorIcon::Crosshair,
-                Zone::Plot if self.drag.is_none() && alt_grab(p).is_some() => CursorIcon::ResizeVertical,
+                Zone::Plot if self.drag.is_none() && alt_grab(p).is_some() => {
+                    CursorIcon::ResizeVertical
+                }
                 Zone::PriceAxis => CursorIcon::ResizeVertical,
                 Zone::TimeAxis => CursorIcon::ResizeHorizontal,
-                Zone::Plot if self.drag.is_some() => CursorIcon::Grabbing,
-                Zone::Plot => CursorIcon::Crosshair,
+                Zone::Plot if self.drag == Some(Zone::Plot) => CursorIcon::Grabbing,
+                Zone::Plot => self.cursor.icon(),
             });
         }
 
         // y range before this frame's input, needed to unlock auto-scale smoothly
-        let (auto_lo, auto_hi) = self.auto_range(bars, data.series.last, plot.width());
-        if self.auto_y {
+        let (auto_lo, auto_hi) = self.auto_range(bars, data.series.last, quote, plot.width());
+        if self.auto_y && !self.measuring {
             (self.y_lo, self.y_hi) = (auto_lo, auto_hi);
         }
 
-        if response.drag_started() {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.measurement = None;
+            self.measuring = false;
+        }
+        let measure_point = |p: Pos2| MeasurePoint {
+            bar: (self.right - ((plot.right() - p.x.clamp(plot.left(), plot.right())) / self.bar_px) as f64)
+                .round().clamp(0.0, (n - 1) as f64) as usize,
+            price: snap_price(price_at(p.y.clamp(plot.top(), plot.bottom()))),
+        };
+        if response.drag_started_by(egui::PointerButton::Primary) {
             // where the button went down: egui reports a drag only after the pointer has moved a few
             // pixels, by then off a thin line (a fast hand would pan instead of grabbing it)
             let at = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos());
             match at.and_then(|p| alt_grab(p).map(|h| (h, price_at(p.y)))) {
                 Some(grabbed) => self.level_drag = Some(grabbed),
-                None => self.drag = at.map(zone_at),
+                None => match at.map(zone_at) {
+                    Some(Zone::Plot) => {
+                        if ghost.is_none() && let Some(at) = at.filter(|p| plot.contains(*p)) {
+                            match self.cursor {
+                                CursorMode::Hand => self.drag = Some(Zone::Plot),
+                                CursorMode::Cross => {
+                                    let start = measure_point(at);
+                                    self.measurement = Some(Measurement { start, end: start });
+                                    self.measuring = true;
+                                }
+                                CursorMode::Arrow => {}
+                            }
+                        }
+                    }
+                    zone => self.drag = zone,
+                },
             }
             self.drag_dy = 0.0;
+        }
+        if self.measuring {
+            if let Some(p) = response.interact_pointer_pos()
+                && let Some(m) = &mut self.measurement
+            {
+                m.end = measure_point(p);
+            }
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                self.measuring = false;
+            }
         }
         if let Some((h, _)) = self.level_drag {
             if let Some(p) = response.interact_pointer_pos().or(hover) {
@@ -406,7 +650,11 @@ impl ChartView {
         }
         // a click on a × removes; with Shift/Ctrl held it places the order following the pointer
         // (ProfitChart: Shift buys, Ctrl sells; limit on the favorable side of the quote, stop beyond)
-        if response.clicked() {
+        if response.clicked() && self.cursor == CursorMode::Cross && ghost.is_none() && !mods.alt {
+            if response.interact_pointer_pos().is_some_and(|p| plot.contains(p)) {
+                self.measurement = None;
+            }
+        } else if response.clicked() {
             match response.interact_pointer_pos().and_then(remove_at) {
                 Some(handle) => self.actions.push(ChartAction::Remove { handle }),
                 None => {
@@ -420,12 +668,15 @@ impl ChartView {
         if response.secondary_clicked() {
             self.menu_price = response.interact_pointer_pos().filter(|p| plot.contains(*p)).map(|p| price_at(p.y));
         }
-        if let (Some(price), Some((bid, ask))) = (self.menu_price, data.quote) {
+        if let (Some(price), Some((bid, ask))) = (self.menu_price, trade_quote) {
             let digits = data.series.digits as usize;
             response.context_menu(|ui| {
                 let buy = if price < ask { OrderKind::Limit } else { OrderKind::Stop };
                 let sell = if price > bid { OrderKind::Limit } else { OrderKind::Stop };
-                let name = |k: OrderKind| if k == OrderKind::Limit { "limite" } else { "stop" };
+                let name = |k: OrderKind| {
+                    if k == OrderKind::Limit { "limite" } else { "stop"
+                    }
+                };
                 for (side, kind, title) in [(Side::Buy, buy, "Compra"), (Side::Sell, sell, "Venda")] {
                     if ui.button(format!("{title} {} @ {price:.digits$}", name(kind))).clicked() {
                         self.actions.push(ChartAction::Order { side, kind, price });
@@ -529,8 +780,8 @@ impl ChartView {
         self.follow = self.right >= n as f64 - 1.0;
         // left edge within a screen of the oldest bar (scrolled or zoomed back)
         self.wants_older = self.right - 2.0 * visible < 0.0;
-        if self.auto_y {
-            let (lo, hi) = self.auto_range(bars, data.series.last, plot.width());
+        if self.auto_y && !self.measuring {
+            let (lo, hi) = self.auto_range(bars, data.series.last, quote, plot.width());
             (self.y_lo, self.y_hi) = (lo, hi);
         }
         if !(self.y_hi - self.y_lo).is_normal() || self.y_hi <= self.y_lo {
@@ -589,7 +840,7 @@ impl ChartView {
 
         // --- volume + candles (one mesh each) -----------------------------------------------------
         let plot_painter = painter.with_clip_rect(plot);
-        let max_vol = bars[i0..=i1].iter().map(|b| b.volume).fold(0.0, f64::max);
+        let max_vol = if data.volume.is_some() { 0.0 } else { bars[i0..=i1].iter().map(|b| b.volume).fold(0.0, f64::max) };
         let vol_h = plot.height() * 0.16;
         let body_w = if self.bar_px >= 3.0 { (self.bar_px * 0.72).max(1.0) } else { 0.0 };
         let wick_w = (1.0 / ppp).max((self.bar_px * 0.08).min(2.0));
@@ -630,30 +881,56 @@ impl ChartView {
                 }
             }
         }
+        // a band in place of the volume (e.g. delta): drawn like the volume, up from the bottom with
+        // the same scale and transparency; the size is |value|, the color its sign
+        if let Some(band) = &data.volume {
+            let last = i1.min(band.values.len().saturating_sub(1));
+            let top = band.values.get(i0..=last).unwrap_or(&[]).iter().filter(|x| x.is_finite()).fold(0.0f64, |m, x| m.max(x.abs()));
+            if top > 0.0 {
+                let w = (self.bar_px * 0.72).max(1.0 / ppp);
+                let faded = band.palette.map(|c| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 60));
+                for i in i0..=last {
+                    let v = band.values[i];
+                    if !v.is_finite() {
+                        continue;
+                    }
+                    let h = (v.abs() / top) as f32 * vol_h;
+                    let cx = f.x(i as f64);
+                    let left = f.snap(cx - w / 2.0, false);
+                    let right = f.snap(cx + w / 2.0, false).max(left + 1.0 / ppp);
+                    let c = faded[if v > 0.0 { 0 } else if v < 0.0 { 1 } else { 2 }];
+                    vol_mesh.add_colored_rect(Rect::from_min_max(Pos2::new(left, plot.bottom() - h), Pos2::new(right, plot.bottom())), c);
+                }
+            }
+        }
         // volume is background context: always behind every layer
         plot_painter.add(Shape::mesh(vol_mesh));
 
         // --- layers, back to front -----------------------------------------------------------------
         let mut candles = Some(mesh);
-        let last_x = f.x((n - 1) as f64);
         for layer in data.layers {
             match layer {
                 Layer::Price => {
                     if let Some(mesh) = candles.take() {
                         plot_painter.add(Shape::mesh(mesh));
                     }
-                    if let Some(last) = data.series.last {
-                        let color = if last >= bars[n - 1].open { pal.up } else { pal.down };
-                        let y = f.snap(f.y(last), true);
-                        if plot.y_range().contains(y) {
-                            plot_painter.extend(Shape::dashed_line(
-                                &[Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
-                                Stroke::new(1.0 / ppp, color.gamma_multiply(0.8)),
-                                3.0,
-                                3.0,
-                            ));
+                    // marks on the candles (POC): a dash that follows the bar width, never wider
+                    // than a body nor thicker than a few pixels, so neighbors don't merge
+                    if let Some(m) = &data.marks {
+                        let w = (self.bar_px * 0.75).clamp(2.0, 10.0);
+                        let h = (self.bar_px * 0.2).clamp(1.0, 2.5);
+                        let mut mesh = Mesh::default();
+                        for i in i0..=i1.min(m.prices.len().saturating_sub(1)) {
+                            let p = m.prices[i];
+                            if !p.is_finite() {
+                                continue;
+                            }
+                            let (cx, cy) = (f.x(i as f64), f.y(p));
+                            mesh.add_colored_rect(Rect::from_center_size(Pos2::new(cx, cy), Vec2::new(w, h)), m.color);
                         }
+                        plot_painter.add(Shape::mesh(mesh));
                     }
+                    draw_prices(&painter, &f, price_axis, data, pal);
                 }
                 Layer::Indicators => {
                     for o in data.overlays {
@@ -661,7 +938,7 @@ impl ChartView {
                     }
                 }
                 Layer::Levels => {
-                    for m in data.map_levels {
+                    for (index, m) in data.map_levels.iter().enumerate() {
                         let y = f.snap(f.y(m.price), true);
                         if !plot.y_range().contains(y) {
                             continue;
@@ -675,8 +952,14 @@ impl ChartView {
                         } else {
                             plot_painter.line_segment(line, stroke);
                         }
-                        let at = Pos2::new(last_x.min(plot.right() - 4.0), y - 2.0);
-                        plot_painter.text(at, Align2::RIGHT_BOTTOM, &m.text, FontId::proportional(11.0), m.color);
+                        let at = Pos2::new(plot.left() + 4.0, y - 2.0);
+                        let label = plot_painter.text(at, Align2::LEFT_BOTTOM, &m.text, FontId::proportional(11.0), m.color);
+                        ui.interact(
+                            label.intersect(plot),
+                            ui.id().with(("map-level", index)),
+                            Sense::hover(),
+                        )
+                        .on_hover_text(&m.details);
                     }
                 }
                 Layer::Trades => {
@@ -795,37 +1078,27 @@ impl ChartView {
             }
         }
         if let Some(pane) = data.pane {
-            self.draw_pane(&painter.with_clip_rect(pane_rect), pane_rect, &f, pane, i0, i1, pal);
-        }
-
-        // --- last price tag on the axis (on top of the other axis tags) ----------------------------
-        if let Some(last) = data.series.last {
-            let b = bars[n - 1];
-            let color = if last >= b.open { pal.up } else { pal.down };
-            let y = f.snap(f.y(last), true);
-            let countdown = data
-                .server_now
-                .map(|now| axis::countdown(b.time + data.tf.seconds() - now.floor() as i64))
-                .filter(|_| data.tf != Timeframe::D1);
-            let h = if countdown.is_some() { 34.0 } else { 19.0 };
-            let top = (y - 9.5).clamp(price_axis.top(), price_axis.bottom() - h);
-            let tag = Rect::from_min_size(Pos2::new(price_axis.left() + 1.0, top), Vec2::new(PRICE_AXIS_W - 2.0, h));
-            painter.rect_filled(tag, CornerRadius::same(3), color);
-            painter.text(
-                Pos2::new(tag.left() + 7.0, top + 9.5),
-                Align2::LEFT_CENTER,
-                format!("{last:.prec$}", prec = digits as usize),
-                FontId::proportional(11.5),
-                Color32::WHITE,
-            );
-            if let Some(cd) = countdown {
-                painter.text(
-                    Pos2::new(tag.left() + 7.0, top + 25.0),
-                    Align2::LEFT_CENTER,
-                    cd,
-                    FontId::proportional(10.5),
-                    Color32::from_white_alpha(210),
-                );
+            // the pane's corner button: "minimizar" when open, the whole strip restores it
+            let pp = painter.with_clip_rect(pane_rect);
+            let button = if data.pane_open {
+                self.draw_pane(&pp, pane_rect, &f, pane, i0, i1, pal);
+                let r = Rect::from_min_size(Pos2::new(pane_rect.right() - 86.0, pane_rect.top() + 4.0), Vec2::new(80.0, 18.0));
+                let hot = hover.is_some_and(|p| r.contains(p));
+                pp.rect_filled(r, CornerRadius::same(3), if hot { pal.tag_bg } else { pal.panel_bg });
+                pp.text(r.center(), Align2::CENTER_CENTER, "minimizar", FontId::proportional(11.0), if hot { pal.text } else { pal.text_dim });
+                r
+            } else {
+                let hot = hover.is_some_and(|p| pane_rect.contains(p));
+                pp.rect_filled(pane_rect, 0.0, if hot { pal.tag_bg } else { pal.panel_bg });
+                pp.hline(pane_rect.x_range(), f.snap(pane_rect.top(), true), Stroke::new(1.0 / ppp, pal.border));
+                pp.text(Pos2::new(pane_rect.left() + 12.0, pane_rect.center().y), Align2::LEFT_CENTER, "Painel minimizado · abrir painel", FontId::proportional(11.0), if hot { pal.text } else { pal.text_dim });
+                pane_rect
+            };
+            if hover.is_some_and(|p| button.contains(p)) {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                if response.clicked() {
+                    self.actions.push(ChartAction::TogglePane);
+                }
             }
         }
 
@@ -834,7 +1107,7 @@ impl ChartView {
             let i = f.index_at(p.x).round().clamp(0.0, (n - 1) as f64) as usize;
             (p, i)
         });
-        if let Some((p, i)) = hovered_bar {
+        if let Some((p, i)) = hovered_bar.filter(|_| self.cursor == CursorMode::Cross && ghost.is_none()) {
             let x = f.snap(f.x(i as f64), true);
             let y = f.snap(p.y, true);
             let stroke = Stroke::new(1.0 / ppp, pal.crosshair);
@@ -865,6 +1138,9 @@ impl ChartView {
 
         let li = hovered_bar.map(|(_, i)| i).unwrap_or(n - 1);
         self.legend(&painter, plot, data, li, pal);
+        if let Some(m) = self.measurement {
+            draw_measurement(&plot_painter, &f, m, digits, pal);
+        }
 
         // --- back to the market -------------------------------------------------------------------
         if !self.follow {
@@ -923,8 +1199,8 @@ impl ChartView {
         }
     }
 
-    /// Auto-scale range: highs/lows of the visible bars plus the last price, with padding.
-    fn auto_range(&self, bars: &[crate::model::Bar], last: Option<f64>, plot_w: f32) -> (f64, f64) {
+    /// Auto-scale range: visible bars and the live quote when the newest bar is visible.
+    fn auto_range(&self, bars: &[crate::model::Bar], last: Option<f64>, quote: Option<(f64, f64)>, plot_w: f32) -> (f64, f64) {
         let n = bars.len();
         let left = self.right - (plot_w / self.bar_px) as f64;
         let i0 = (left.floor().max(0.0) as usize).min(n.saturating_sub(1));
@@ -937,6 +1213,10 @@ impl ChartView {
         if let Some(p) = last.filter(|_| i1 + 1 >= n) {
             lo = lo.min(p);
             hi = hi.max(p);
+        }
+        if let Some((bid, ask)) = quote.filter(|_| i1 + 1 >= n) {
+            lo = lo.min(bid);
+            hi = hi.max(ask);
         }
         if !lo.is_finite() {
             return (self.y_lo, self.y_hi);
@@ -964,6 +1244,128 @@ impl ChartView {
             put(format!("{v:.d$}"), FontId::proportional(12.0), color, 10.0);
         }
         put(format!("{change:+.2}%"), FontId::proportional(12.0), color, 0.0);
+        if let Some((bid, ask)) = valid_quote(data.quote) {
+            let text = format!("BID {bid:.d$}   ASK {ask:.d$}   Spread {:.d$}", ask - bid);
+            let painter = painter.with_clip_rect(plot);
+            let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), pal.text);
+            let pos = Pos2::new(plot.left() + 12.0, plot.top() + 30.0);
+            painter.rect_filled(Rect::from_min_size(pos, galley.size()).expand(3.0), CornerRadius::same(3), pal.chart_bg);
+            painter.galley(pos, galley, pal.text);
+        }
+    }
+}
+
+fn draw_measurement(painter: &egui::Painter, f: &Frame, m: Measurement, digits: u32, pal: &Palette) {
+    let start = Pos2::new(f.x(m.start.bar as f64), f.y(m.start.price));
+    let end = Pos2::new(f.x(m.end.bar as f64), f.y(m.end.price));
+    let area = Rect::from_two_pos(start, end);
+    painter.rect_filled(area, 0.0, pal.accent.gamma_multiply(0.10));
+    let stroke = Stroke::new(1.0 / f.ppp, pal.accent);
+    let corner = Pos2::new(end.x, start.y);
+    painter.extend(Shape::dashed_line(&[start, corner, end], stroke, 4.0, 4.0));
+    painter.line_segment([start, end], Stroke::new(1.5, pal.accent));
+    for point in [start, end] {
+        painter.circle_filled(point, 3.0, pal.accent);
+    }
+    let percent = m.percent().map(|p| format!("{p:+.2}%")).unwrap_or_else(|| "—".into());
+    let bars = m.bars();
+    let text = format!("{percent} · {bars} {}\n{:.d$} → {:.d$}",
+        if bars == 1 { "barra" } else { "barras" }, m.start.price, m.end.price, d = digits as usize);
+    let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), pal.text);
+    let size = galley.size() + Vec2::new(16.0, 12.0);
+    let x = (end.x + 12.0).clamp(f.plot.left() + 4.0, (f.plot.right() - size.x - 4.0).max(f.plot.left() + 4.0));
+    let y = (end.y - size.y - 12.0).clamp(f.plot.top() + 4.0, (f.plot.bottom() - size.y - 4.0).max(f.plot.top() + 4.0));
+    let tag = Rect::from_min_size(Pos2::new(x, y), size);
+    painter.rect_filled(tag, CornerRadius::same(4), pal.tag_bg);
+    painter.rect_stroke(tag, CornerRadius::same(4), stroke, egui::StrokeKind::Inside);
+    painter.galley(tag.min + Vec2::new(8.0, 6.0), galley, pal.text);
+}
+
+fn valid_quote(quote: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    quote.filter(|&(bid, ask)| bid.is_finite() && ask.is_finite() && bid > 0.0 && ask >= bid)
+}
+
+/// Keep the two quote tags apart, even at zero spread; only labels move, never the price lines.
+fn quote_tag_tops(axis: Rect, ask_y: f32, bid_y: f32, bid_h: f32, trade_ys: &[f32]) -> [f32; 2] {
+    let clamp = |top: f32, h: f32| top.clamp(axis.top(), (axis.bottom() - h).max(axis.top()));
+    let ask_top = clamp(ask_y - 24.5, 34.0);
+    let bid_top = clamp(bid_y - 24.5, bid_h);
+    let tops = if bid_top >= ask_top + 36.0 {
+        [ask_top, bid_top]
+    } else {
+        let ask_top = clamp((ask_y + bid_y) * 0.5 - (36.0 + bid_h) * 0.5, 36.0 + bid_h);
+        [ask_top, ask_top + 36.0]
+    };
+    let overlaps_trade = |top: f32, h: f32| {
+        trade_ys.iter().any(|y| top < y + 11.5 && top + h > y - 11.5)
+    };
+    if !overlaps_trade(tops[0], 34.0) && !overlaps_trade(tops[1], bid_h) {
+        return tops;
+    }
+    // If a trade tag is nearby, find the nearest free space for the pair. Operations retain their
+    // exact axis positions and remain in front; the connectors still point at the true bid/ask.
+    let h = 36.0 + bid_h;
+    let ideal = clamp((ask_y + bid_y) * 0.5 - h * 0.5, h);
+    let candidates = [ideal, axis.top(), clamp(axis.bottom() - h, h)].into_iter()
+        .chain(trade_ys.iter().flat_map(|y| [clamp(y - 11.5 - h, h), clamp(y + 11.5, h)]));
+    let top = candidates.filter(|&top| !overlaps_trade(top, h))
+        .min_by(|a, b| (a - ideal).abs().total_cmp(&(b - ideal).abs()));
+    top.map(|top| [top, top + 36.0]).unwrap_or(tops)
+}
+
+/// Draw in the price layer so operation lines and tags can stay in front of the live quote.
+fn draw_prices(painter: &egui::Painter, f: &Frame, price_axis: Rect, data: &ChartData, pal: &Palette) {
+    let plot_painter = painter.with_clip_rect(f.plot);
+    let axis_painter = painter.with_clip_rect(price_axis);
+    let b = data.series.bars.last().unwrap();
+    let countdown = data.server_now
+        .map(|now| axis::countdown(b.time + data.tf.seconds() - now.floor() as i64))
+        .filter(|_| data.tf != Timeframe::D1);
+    let d = data.series.digits as usize;
+    if let Some((bid, ask)) = valid_quote(data.quote) {
+        let bid_h = if countdown.is_some() { 49.0 } else { 34.0 };
+        let trade_ys: Vec<f32> = data.levels.iter().map(|l| f.snap(f.y(l.price), true))
+            .filter(|y| f.plot.y_range().contains(*y)).collect();
+        let tops = quote_tag_tops(price_axis, f.y(ask), f.y(bid), bid_h, &trade_ys);
+        for (name, price, color, top, h, cd) in [
+            ("ASK", ask, pal.down, tops[0], 34.0, None),
+            ("BID", bid, pal.accent, tops[1], bid_h, countdown.as_deref()),
+        ] {
+            let y = f.snap(f.y(price), true);
+            if !f.plot.y_range().contains(y) {
+                continue;
+            }
+            plot_painter.extend(Shape::dashed_line(
+                &[Pos2::new(f.plot.left(), y), Pos2::new(f.plot.right(), y)],
+                Stroke::new(1.0 / f.ppp, color), 3.0, 3.0,
+            ));
+            let tag = Rect::from_min_size(Pos2::new(price_axis.left() + 5.0, top), Vec2::new(PRICE_AXIS_W - 6.0, h));
+            axis_painter.line_segment([Pos2::new(price_axis.left(), y), Pos2::new(tag.left(), top + 24.5)], Stroke::new(1.0 / f.ppp, color));
+            axis_painter.rect_filled(tag, CornerRadius::same(3), color);
+            axis_painter.text(Pos2::new(tag.left() + 5.0, top + 8.0), Align2::LEFT_CENTER, name, FontId::proportional(10.0), Color32::WHITE);
+            axis_painter.text(Pos2::new(tag.left() + 5.0, top + 24.5), Align2::LEFT_CENTER, format!("{price:.d$}"), FontId::proportional(11.5), Color32::WHITE);
+            if let Some(cd) = cd {
+                axis_painter.text(Pos2::new(tag.left() + 5.0, top + 40.0), Align2::LEFT_CENTER, cd, FontId::proportional(10.5), Color32::from_white_alpha(210));
+            }
+        }
+    } else if let Some(last) = data.series.last {
+        // Historical close until the first live quote arrives; do not invent an ask or spread.
+        let color = if last >= b.open { pal.up } else { pal.down };
+        let y = f.snap(f.y(last), true);
+        if f.plot.y_range().contains(y) {
+            plot_painter.extend(Shape::dashed_line(
+                &[Pos2::new(f.plot.left(), y), Pos2::new(f.plot.right(), y)],
+                Stroke::new(1.0 / f.ppp, color.gamma_multiply(0.8)), 3.0, 3.0,
+            ));
+        }
+        let h = if countdown.is_some() { 34.0 } else { 19.0 };
+        let top = (y - 9.5).clamp(price_axis.top(), (price_axis.bottom() - h).max(price_axis.top()));
+        let tag = Rect::from_min_size(Pos2::new(price_axis.left() + 1.0, top), Vec2::new(PRICE_AXIS_W - 2.0, h));
+        axis_painter.rect_filled(tag, CornerRadius::same(3), color);
+        axis_painter.text(Pos2::new(tag.left() + 7.0, top + 9.5), Align2::LEFT_CENTER, format!("{last:.d$}"), FontId::proportional(11.5), Color32::WHITE);
+        if let Some(cd) = countdown {
+            axis_painter.text(Pos2::new(tag.left() + 7.0, top + 25.0), Align2::LEFT_CENTER, cd, FontId::proportional(10.5), Color32::from_white_alpha(210));
+        }
     }
 }
 
@@ -1012,4 +1414,185 @@ fn draw_overlay(painter: &egui::Painter, f: &Frame, o: &Overlay, i0: usize, i1: 
         run.push(p);
     }
     flush(&mut run, run_color);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Bar;
+
+    #[test]
+    fn measurement_counts_intervals_and_signed_percentage_from_start() {
+        let mut m = Measurement { start: MeasurePoint { bar: 20, price: 100.0 }, end: MeasurePoint { bar: 30, price: 110.0 } };
+        assert_eq!(m.bars(), 10);
+        assert_eq!(m.percent(), Some(10.0));
+        m.end = MeasurePoint { bar: 5, price: 90.0 };
+        assert_eq!(m.bars(), 15);
+        assert_eq!(m.percent(), Some(-10.0));
+        m.end = m.start;
+        assert_eq!(m.bars(), 0);
+        assert_eq!(m.percent(), Some(0.0));
+        m.start.price = 0.0;
+        assert_eq!(m.percent(), None);
+    }
+
+    fn chart_frame(ctx: &egui::Context, view: &mut ChartView, data: &ChartData, events: Vec<egui::Event>) -> egui::FullOutput {
+        let mut output = ctx.run_ui(egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            events, ..Default::default()
+        }, |ui| {
+            egui::CentralPanel::no_frame().show(ui, |ui| view.ui(ui, data, &Palette::default()));
+        });
+        output.textures_delta.clear();
+        output
+    }
+
+    fn pointer_button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    #[test]
+    fn only_hand_pans_cross_measures_and_arrow_stays_still() {
+        let series = Series::new((0..120).map(|i| Bar {
+            time: i * 300, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0,
+        }).collect(), 2);
+        for cursor in CursorMode::ALL {
+            let data = ChartData {
+                series: &series, symbol: "X", tf: Timeframe::M5, server_now: None,
+                levels: &[], overlays: &[], map_levels: &[], pane: None, pane_open: false,
+                layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor, tick: 0.0,
+                order_volume: "1", bracket: None, volume: None, marks: None,
+            };
+            let ctx = egui::Context::default();
+            let mut view = ChartView::default();
+            chart_frame(&ctx, &mut view, &data, vec![]);
+            let right = view.right;
+            let range = (view.y_lo, view.y_hi);
+            let start = Pos2::new(300.0, 400.0);
+            let end = Pos2::new(380.0, 200.0);
+            chart_frame(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(start), pointer_button(start, true)]);
+            chart_frame(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(end)]);
+            let output = chart_frame(&ctx, &mut view, &data, vec![pointer_button(end, false)]);
+            assert!(view.actions.is_empty());
+            match cursor {
+                CursorMode::Hand => {
+                    assert_eq!(view.right, right - 10.0);
+                    assert_ne!((view.y_lo, view.y_hi), range);
+                    assert!(view.measurement.is_none());
+                }
+                CursorMode::Arrow => {
+                    assert_eq!(view.right, right);
+                    assert_eq!((view.y_lo, view.y_hi), range);
+                    assert!(view.measurement.is_none());
+                }
+                CursorMode::Cross => {
+                    assert_eq!(view.right, right);
+                    assert_eq!((view.y_lo, view.y_hi), range);
+                    let m = view.measurement.unwrap();
+                    assert_eq!(m.bars(), 10);
+                    assert!(m.percent().unwrap() > 0.0);
+                    assert!(!view.measuring);
+                    assert!(output.shapes.iter().any(|s| match &s.shape {
+                        Shape::Text(t) => t.galley.job.text.contains("% · 10 barras"),
+                        _ => false,
+                    }));
+                    chart_frame(&ctx, &mut view, &data, vec![egui::Event::Key {
+                        key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default(),
+                    }]);
+                    assert!(view.measurement.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changing_cursor_and_reset_clear_measurement() {
+        let m = Measurement { start: MeasurePoint { bar: 0, price: 100.0 }, end: MeasurePoint { bar: 5, price: 101.0 } };
+        let mut view = ChartView { cursor: CursorMode::Cross, measurement: Some(m), measuring: true, ..ChartView::default() };
+        view.set_cursor(CursorMode::Arrow);
+        assert!(view.measurement.is_none() && !view.measuring);
+        view.set_cursor(CursorMode::Cross);
+        view.measurement = Some(m);
+        view.reset();
+        assert_eq!(view.cursor, CursorMode::Cross);
+        assert!(view.measurement.is_none());
+    }
+
+    #[test]
+    fn quote_tags_remain_separate_at_zero_spread_and_axis_edges() {
+        let axis = Rect::from_min_max(Pos2::new(600.0, 20.0), Pos2::new(676.0, 620.0));
+        for bid_h in [34.0, 49.0] {
+            for ask_y in [20.0_f32, 21.0, 300.0, 600.0, 620.0] {
+                for gap in [0.0, 0.1, 2.0, 40.0, 100.0] {
+                    let bid_y = (ask_y + gap).min(axis.bottom());
+                    let [ask_top, bid_top] = quote_tag_tops(axis, ask_y, bid_y, bid_h, &[]);
+                    assert!(ask_top >= axis.top());
+                    assert!(ask_top + 34.0 <= bid_top);
+                    assert!(bid_top + bid_h <= axis.bottom());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quote_tags_avoid_nearby_operation_prices() {
+        let axis = Rect::from_min_max(Pos2::new(600.0, 20.0), Pos2::new(676.0, 620.0));
+        for trade_ys in [&[300.0][..], &[299.0, 320.0][..], &[20.0, 45.0][..], &[600.0, 620.0][..]] {
+            let [ask_top, bid_top] = quote_tag_tops(axis, trade_ys[0], trade_ys[0] + 1.0, 49.0, trade_ys);
+            assert!(ask_top >= axis.top() && bid_top + 49.0 <= axis.bottom());
+            for y in trade_ys {
+                assert!(ask_top + 34.0 <= y - 11.5 || ask_top >= y + 11.5);
+                assert!(bid_top + 49.0 <= y - 11.5 || bid_top >= y + 11.5);
+            }
+        }
+    }
+
+    #[test]
+    fn live_ask_is_in_auto_range_only_when_latest_bar_is_visible() {
+        let bars = vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }; 100];
+        let mut view = ChartView { right: 105.0, ..ChartView::default() };
+        let (lo, hi) = view.auto_range(&bars, Some(100.0), Some((100.0, 110.0)), 400.0);
+        assert!(lo < 100.0 && hi > 110.0);
+        view.right = 50.0;
+        let (_, hi) = view.auto_range(&bars, Some(100.0), Some((100.0, 110.0)), 400.0);
+        assert!(hi < 110.0);
+    }
+
+    #[test]
+    fn locked_chart_shows_quote_without_order_preview_and_trades_draw_on_top() {
+        let series = Series::new(vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }], 2);
+        let levels = [Level { price: 100.0, color: Color32::RED, label: "operation".into(), dashed: false, handle: None, side: None }];
+        let data = ChartData {
+            series: &series, symbol: "X", tf: Timeframe::M5, server_now: Some(1.0),
+            levels: &levels, overlays: &[], map_levels: &[], pane: None, pane_open: false,
+            layers: &[Layer::Levels, Layer::Indicators, Layer::Price, Layer::Trades],
+            quote: Some((100.0, 100.25)), can_trade: false, cursor: CursorMode::Hand, tick: 0.25, order_volume: "1",
+            bracket: None, volume: None, marks: None,
+        };
+        let ctx = egui::Context::default();
+        let mut view = ChartView::default();
+        let mut output = ctx.run_ui(egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            events: vec![
+                egui::Event::ModifiersChanged(egui::Modifiers { shift: true, ..Default::default() }),
+                egui::Event::PointerMoved(Pos2::new(300.0, 300.0)),
+            ],
+            ..Default::default()
+        }, |ui| {
+            egui::CentralPanel::no_frame().show(ui, |ui| view.ui(ui, &data, &Palette::default()));
+        });
+        output.textures_delta.clear(); // No GPU backend in this render test.
+        let texts: Vec<&str> = output.shapes.iter().filter_map(|s| match &s.shape {
+            Shape::Text(t) => Some(t.galley.job.text.as_str()),
+            _ => None,
+        }).collect();
+        assert!(texts.contains(&"ASK") && texts.contains(&"BID"));
+        assert!(texts.contains(&"100.25"));
+        assert!(texts.contains(&"BID 100.00   ASK 100.25   Spread 0.25"));
+        assert!(!texts.iter().any(|t| t.contains("clique para posicionar")));
+        let bid_index = texts.iter().position(|t| *t == "BID").unwrap();
+        let operation_index = texts.iter().position(|t| *t == "operation").unwrap();
+        assert!(bid_index < operation_index, "operations must paint after price tags");
+        assert!(view.actions.is_empty());
+    }
 }

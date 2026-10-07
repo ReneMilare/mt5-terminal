@@ -16,6 +16,9 @@ pub const WARM_CHUNK: u32 = 5000;
 pub enum Need {
     /// One more chunk, whatever is loaded (the view reached the oldest bar).
     More,
+    /// At least this many bars, including the forming bar, regardless of session gaps.
+    #[cfg_attr(not(has_preset), allow(dead_code))] // Optional presets request exact bar counts.
+    Bars { count: usize },
     /// From `span` seconds before the newest bar, or at least `cap` bars, whichever comes first.
     Since { span: i64, cap: usize },
 }
@@ -51,6 +54,7 @@ impl Loader {
         let bars = store.bars(symbol, tf);
         match need {
             Need::More => false,
+            Need::Bars { count } => bars.len() >= count,
             Need::Since { span, cap } => match (bars.first(), bars.last()) {
                 (Some(first), Some(last)) => bars.len() >= cap || first.time <= last.time - span,
                 _ => false,
@@ -66,7 +70,12 @@ impl Loader {
             return None;
         }
         st.in_flight = Some(Some(first));
-        let count = if need == Need::More { CHUNK } else { WARM_CHUNK };
+        let count = match need {
+            Need::More => CHUNK,
+            Need::Bars { count } => count
+                .saturating_sub(store.bars(symbol, tf).len())
+                .min(WARM_CHUNK as usize) as u32,
+            Need::Since { .. } => WARM_CHUNK };
         Some(Command::History { symbol: symbol.into(), tf, count, before: Some(first) })
     }
 
@@ -100,6 +109,25 @@ mod tests {
 
     fn bars(from: i64, n: i64) -> Vec<Bar> {
         (0..n).map(|i| Bar { time: (from + i) * 60, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 1.0 }).collect()
+    }
+
+    #[test]
+    fn bar_count_requests_only_missing_history_across_session_gaps() {
+        let (mut store, mut loader) = (Store::default(), Loader::default());
+        store.put("X", Timeframe::D1, bars(1000, 300), 2);
+        let need = Need::Bars { count: 301 };
+        assert!(!loader.ready(&store, "X", Timeframe::D1, need));
+        let Some(Command::History { count, before, .. }) =
+            loader.older(&store, "X", Timeframe::D1, need)
+        else {
+            panic!()
+        };
+        assert_eq!(count, 1);
+        assert!(loader.older(&store, "X", Timeframe::D1, need).is_none());
+        store.put("X", Timeframe::D1, bars(900, 1), 2);
+        loader.on_bars("X", Timeframe::D1, before, false);
+        assert!(loader.ready(&store, "X", Timeframe::D1, need));
+        assert!(loader.older(&store, "X", Timeframe::D1, need).is_none());
     }
 
     #[test]

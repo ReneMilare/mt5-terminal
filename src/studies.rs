@@ -17,6 +17,8 @@ pub struct Needs {
     pub first: Vec<(String, Timeframe, u32)>,
     /// How far back extra series must reach: (symbol, timeframe, need).
     pub older: Vec<(String, Timeframe, Need)>,
+    /// Closed bars of the chart whose volume delta (and POC, see `delta_row`) they read (0 = none).
+    pub delta_bars: u32,
 }
 
 #[cfg(has_preset)]
@@ -28,15 +30,23 @@ pub use none::Studies;
 #[cfg(not(has_preset))]
 mod none {
     use super::Needs;
-    use crate::chart::{MapLevel, Overlay, Pane};
+    use crate::chart::{MapLevel, Marks, Overlay, Pane, VolumeBand};
     use crate::history::Need;
     use crate::model::{Store, Timeframe};
 
     pub struct Studies;
 
     impl Studies {
-        pub fn new(_symbol: &str, _tf: Timeframe) -> Self {
+        pub fn new(_symbol: &str, _tf: Timeframe, _fibonacci: &crate::settings::Fibonacci) -> Self {
             Studies
+        }
+
+        pub fn configure_fibonacci(&mut self, _settings: &crate::settings::Fibonacci) -> bool {
+            false
+        }
+
+        pub fn fibonacci_state(&self) -> serde_json::Value {
+            serde_json::json!({"enabled": false, "timeframes": []})
         }
 
         pub fn is_for(&self, _symbol: &str, _tf: Timeframe) -> bool {
@@ -55,9 +65,20 @@ mod none {
         /// New history arrived (any series).
         pub fn data_arrived(&mut self) {}
 
-        /// Bring everything up to date. `warm`: the chart covers `warmup`. `now`: server time.
-        /// `quote(symbol)`: last (bid, tick time in server seconds).
-        pub fn update(&mut self, _store: &Store, _digits: u32, _warm: bool, _now: Option<i64>, _quote: impl Fn(&str) -> Option<(f64, i64)>) {}
+        /// Bring everything up to date. `tick`: price step of the chart symbol. `warm`: the chart covers
+        /// `warmup`. `now`: server time. `quote(symbol)`: last (bid, tick time in server seconds).
+        #[allow(clippy::too_many_arguments)]
+        pub fn update(&mut self, _store: &Store, _digits: u32, _tick: f64, _warm: bool, _now: Option<i64>, _quote: impl Fn(&str) -> Option<(f64, i64)>) {}
+
+        /// Price level height for the per-bar POC once known (the delta is requested with it).
+        pub fn delta_row(&self) -> Option<f64> {
+            None
+        }
+
+        /// One mark per bar over the candles (e.g. POC).
+        pub fn marks(&self) -> Option<Marks<'_>> {
+            None
+        }
 
         pub fn overlays(&self) -> Vec<Overlay<'_>> {
             Vec::new()
@@ -68,6 +89,11 @@ mod none {
         }
 
         pub fn pane(&self) -> Option<Pane<'_>> {
+            None
+        }
+
+        /// Replaces the volume band (None: the plain volume).
+        pub fn volume(&self) -> Option<VolumeBand<'_>> {
             None
         }
     }

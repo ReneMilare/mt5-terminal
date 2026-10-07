@@ -3,7 +3,7 @@
 
 use super::{Command, Event, Feed, Message, OrderKind, PendingOrder, Position, Side};
 use crate::model::{Bar, Series, Timeframe};
-use crossbeam_channel::{unbounded, RecvTimeoutError};
+use crossbeam_channel::{RecvTimeoutError, unbounded};
 use std::collections::HashMap;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -46,7 +46,9 @@ struct Walk {
 
 impl Walk {
     fn new(symbol: &str, now: i64) -> Self {
-        let seed = symbol.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+        let seed = symbol.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+        });
         let start = match symbol {
             "UsaTec" => 31_000.0,
             "UsaInd" => 51_000.0,
@@ -158,8 +160,12 @@ impl Paper {
         }
         let valid = match (kind, side) {
             (OrderKind::Market, _) => true,
-            (OrderKind::Limit, Side::Buy) | (OrderKind::Stop, Side::Sell) => price > 0.0 && price < if side == Side::Buy { ask } else { bid },
-            (OrderKind::Limit, Side::Sell) | (OrderKind::Stop, Side::Buy) => price > if side == Side::Buy { ask } else { bid },
+            (OrderKind::Limit, Side::Buy) | (OrderKind::Stop, Side::Sell) => {
+                price > 0.0 && price < if side == Side::Buy { ask } else { bid }
+            }
+            (OrderKind::Limit, Side::Sell) | (OrderKind::Stop, Side::Buy) => {
+                price > if side == Side::Buy { ask } else { bid }
+            },
         };
         if !valid {
             return result(id, false, 10015, "preço inválido", 0, 0.0);
@@ -365,7 +371,9 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Feed {
                     }
                     Err(RecvTimeoutError::Disconnected) => return,
                 };
-                let mut quote = |symbol: &str| walks.entry(symbol.to_string()).or_insert_with(|| Walk::new(symbol, now_secs())).quote();
+                let mut quote = |symbol: &str| {
+                    walks.entry(symbol.to_string()).or_insert_with(|| Walk::new(symbol, now_secs())).quote()
+                };
                 let out: Vec<Message> = match cmd {
                     Command::History { symbol, tf, count, before } => {
                         let walk = walks.entry(symbol.clone()).or_insert_with(|| Walk::new(&symbol, now_secs()));
@@ -390,7 +398,10 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Feed {
                         subscribed = symbols;
                         continue;
                     }
-                    Command::Probe { .. } | Command::Objects { .. } => continue,
+                    // no tick history here: the live bars' delta comes from the ticks in the app
+                    Command::Probe { .. } | Command::Objects { .. } | Command::Delta { .. } => {
+                        continue;
+                    }
                     Command::Order { id, symbol, side, kind, volume, price, sl, tp } => {
                         let q = quote(&symbol);
                         let r = paper.order(id, &symbol, side, kind, volume, price, sl, tp, q);
@@ -414,7 +425,9 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Feed {
                                 (s, q)
                             })
                             .collect();
-                        let r = paper.modify(id, ticket, price, sl, tp, |s| symbols.get(s).copied().unwrap_or((0.0, 0.0)));
+                        let r = paper.modify(id, ticket, price, sl, tp, |s| {
+                            symbols.get(s).copied().unwrap_or((0.0, 0.0))
+                        });
                         std::iter::once(r).chain(paper.state()).collect()
                     }
                     Command::Flatten { id, symbol } => {

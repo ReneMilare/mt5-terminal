@@ -19,13 +19,23 @@ por isso antes de qualquer outra coisa.
   valores (`trend::shift_front`), sem recalcular. A passada completa roda uma vez, depois do
   aquecimento. Arquivos externos só são relidos quando mudam, nunca no tick.
 - **Desenho:** só os candles visíveis, malhas únicas (`Mesh`) para candles e volume, linhas por trechos
-  de mesma cor. Meça antes de afirmar ganho: `cargo test --release -- --ignored --nocapture bench`.
+  de mesma cor. Meça antes de afirmar ganho: `cargo test --release -- --ignored --nocapture bench`;
+  no app, `MT5_TERMINAL_PERF=1` imprime a cada 5 s quadros/s, ticks/s e o tempo de cada quadro.
 
 ## Gráfico
+
+- O rodapé mostra o volume, ou o que o preset puser no lugar (`Studies::volume`, ex.: delta de volume).
+  O delta por candle: exato do EA para os fechados (comando `delta`, em fatias), ao vivo pelos ticks
+  para o em formação (`model::Deltas`), e o EA é chamado de novo a cada candle que fecha.
+- Marcas por candle sobre os candles (`Studies::marks`, ex.: POC): traço que acompanha a largura do
+  candle (`chart::Marks`). A POC vem junto com o delta (`row` do preset no comando `delta`).
 
 - O **preço fica na frente de tudo** por padrão (`Layer::DEFAULT`, de trás para a frente: níveis,
   indicadores, posições/ordens, preço). O usuário muda a ordem no menu **Camadas**; a escolha fica no
   `config.toml` (`chart.layers`). O volume fica sempre no fundo.
+- Bid e ask têm linhas e etiquetas identificadas na camada preço, com spread em preço na legenda;
+  etiquetas próximas se separam sem deslocar as linhas. Cotações aparecem mesmo com a boleta travada;
+  `ChartData::can_trade` controla apenas as prévias de ordem e o menu de operação.
 - Operações predefinidas (`[[presets]]`: volume, stop e alvo em % da entrada ou em pontos; a ativa em
   `[ticket] preset`): escolhidas na boleta, editadas na janela "Operações predefinidas"; com Shift/Ctrl a
   ordem que segue o ponteiro já mostra o stop e o alvo (`trading::Bracket`). Volumes e preços vão à
@@ -33,11 +43,17 @@ por isso antes de qualquer outra coisa.
 - Cores (janela **Cores**, como a aba de cores do MT5): fundo, painéis, grade, texto, destaque, alta/baixa
   e candles (corpo e contorno/pavio separados; corpo ≠ contorno desenha borda), com predefinições;
   aplicadas na hora e gravadas em `[colors]` (`COLOR_KEYS` em `settings.rs`).
-- Teclado: ←/→ movem, +/− zoom (fora de campos de texto). Atalhos de ordem: Ctrl+Shift+B/S (compra/venda), Z (zerar), R (inverter), E (breakeven).
+- Teclado: ←/→ movem, +/− zoom (fora de campos de texto). Atalhos de ordem: Ctrl+Shift+B/S (compra/venda), Z (zerar), R (inverter), E (breakeven), também com a boleta recolhida (`Trading::shortcuts`).
+- Cursor por ícones na barra superior: Seta aponta, Mão arrasta o gráfico, Cruz mede ao clicar e arrastar (% sobre
+  o preço inicial e distância entre barras; a mesma barra = 0). Soltar mantém a medição; Esc, um clique
+  no gráfico ou troca de cursor/símbolo/timeframe limpa. Seleção em `chart.cursor` (`arrow/hand/cross`).
+- Mais espaço para o gráfico: a boleta recolhe numa faixa (» / «) e o painel do preset minimiza numa
+  faixa ("minimizar" / clique na faixa); o estado fica em `[ui]` (`ticket_open`, `pane_open`).
 - Como no ProfitChart: segurando Shift (compra) ou Ctrl (venda) a ordem acompanha o ponteiro, já no
   preço do tick, e o clique a posiciona (limite do lado favorável, stop do outro); arrastar a linha de
   uma posição **com Alt segurado** para o lado do ganho põe o alvo, para o da perda o stop (compra:
-  cima = alvo); com Alt, linhas de ordem, stop e alvo se arrastam (sem Alt, arrastar só move o gráfico); o × da linha (ou Delete com o mouse sobre ela) fecha a posição (o
+  cima = alvo); com Alt, linhas de ordem, stop e alvo se arrastam; sem Alt, o modo Mão move o gráfico
+  e o modo Cruz mede. O × da linha nos modos Seta/Mão (ou Delete com o mouse sobre ela) fecha a posição (o
   stop e o alvo dela vão junto), cancela a ordem ou tira só o stop/alvo; botão direito abre um menu.
   Tudo sob as mesmas travas da boleta.
 
@@ -46,7 +62,9 @@ por isso antes de qualquer outra coisa.
 O app não traz indicadores: um preset privado em `preset/` (repositório próprio, ignorado por este)
 entra na compilação quando a pasta existe (`build.rs` → `cfg(has_preset)`) e implementa a interface de
 `src/studies.rs`. Sem a pasta, o app compila e roda sem indicadores; teste as duas formas. Detalhes do
-preset ficam em `preset/CLAUDE.md`.
+preset ficam em `preset/CLAUDE.md`. `[fibonacci]` configura os pivôs/retrações do mapa do preset;
+`Studies::new` recebe as opções, `configure_fibonacci` aplica alterações e `fibonacci_state` expõe as
+âncoras e os níveis no `ctl state`.
 
 ## Configuração
 
@@ -72,7 +90,9 @@ preset ficam em `preset/CLAUDE.md`.
 - `tools/build-ea.sh` compila com o MetaEditor e instala em `MQL5/Experts/MT5Terminal`, usando o mesmo
   Wine que serve o prefixo `~/.mt5` (nunca dois Wines no mesmo prefixo; sem MT5 aberto, o `wine` do
   sistema, como o atalho do MT5).
-- O MT5 **não** recarrega o EA sozinho: depois de recompilar, o usuário remove e anexa de novo.
+- O MT5 **não** recarrega o EA sozinho, mas carrega o `.ex5` novo ao iniciar: depois de recompilar,
+  feche o MT5 pela janela (`hl.dsp.window.close`) e abra de novo (o app abre o MT5 se ele estiver
+  fechado) — não é preciso remover e anexar o EA.
   Mudou o protocolo? Suba `BRIDGE_VERSION` nos dois lados; o app avisa quando o EA é mais antigo.
 
 ## Testes

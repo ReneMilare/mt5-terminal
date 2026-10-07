@@ -46,6 +46,16 @@ pub enum Command {
     Cancel { id: u64, ticket: u64 },
     /// Close every position and delete every pending order of `symbol` (one result per request sent).
     Flatten { id: u64, symbol: String },
+    /// Buy/sell volume (tick rule) of the last `count` closed bars, newest first, in several
+    /// [`Message::Delta`] batches computed by the EA in slices. With `row` > 0 each bar also brings
+    /// its POC: the middle of the `row`-high price level with the most counted ticks.
+    Delta {
+        symbol: String,
+        tf: Timeframe,
+        count: u32,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        row: f64,
+    },
     /// Change a pending order (`price`, `sl`, `tp`) or a position's stops (`sl`, `tp`; `price` ignored).
     /// All values absolute; 0 removes a stop.
     Modify {
@@ -193,6 +203,13 @@ pub enum Message {
         #[serde(default)]
         price: f64,
     },
+    /// `[time, buy, sell]` per closed bar, plus `poc` when the request had a `row` (bars without
+    /// ticks are left out).
+    Delta {
+        symbol: String,
+        tf: Timeframe,
+        bars: Vec<Vec<f64>>,
+    },
     Probe {
         id: u64,
         indicator: String,
@@ -210,9 +227,13 @@ pub enum Message {
     },
 }
 
-/// Protocol version this app speaks; older EAs lack modify + netting flag (v4), paged history (v3),
+/// Protocol version this app speaks; older EAs lack the POC per bar (v6), the delta (v5), modify + netting flag (v4), paged history (v3),
 /// the history queue and probes (v2).
-pub const BRIDGE_VERSION: u32 = 4;
+pub const BRIDGE_VERSION: u32 = 6;
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
 
 fn first_version() -> u32 {
     1

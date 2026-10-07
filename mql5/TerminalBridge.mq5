@@ -6,7 +6,7 @@
 //| Veja docs/protocol.md.                                           |
 //+------------------------------------------------------------------+
 #property copyright "MT5 Terminal"
-#property version   "4.00"
+#property version   "6.00"
 #property description "Ponte do MT5 Terminal: cotações, histórico e ordens por TCP local."
 
 input string InpHost      = "127.0.0.1"; // Endereço do app
@@ -15,7 +15,7 @@ input ulong  InpMagic     = 47011;       // Número mágico das ordens do app
 input ulong  InpDeviation = 20;          // Desvio máximo a mercado (pontos)
 input int    InpTimerMs   = 10;          // Ciclo (ms): ticks, comandos e estado
 
-#define BRIDGE_VERSION 4 // sobe quando o protocolo muda; o app avisa se o EA for mais antigo
+#define BRIDGE_VERSION 6 // sobe quando o protocolo muda; o app avisa se o EA for mais antigo
 #define RECONNECT_MS 1000
 #define STATE_MS     100
 #define MAX_TICKS    2000
@@ -40,6 +40,21 @@ long     g_hBefore[];   // 0 = os mais recentes; senão, os anteriores a este ho
 int      g_hTries[];
 
 ulong    g_nextState = 0;
+
+// delta de volume por candle (comando "delta"): um pedido por vez, uma leitura de ticks por ciclo
+#define DELTA_CHUNK_MSC 21600000 // ticks lidos em blocos de até 6 horas
+#define DELTA_TRIES     20       // bloco sem ticks (histórico baixando) é pulado depois disso
+string   g_qSym[];
+string   g_qTf[];
+int      g_qCount[];
+double   g_qRow[];
+double   g_dRow = 0;              // altura do nível da POC (0 = sem POC)
+string   g_dSym = "";
+string   g_dTf = "";
+long     g_dPeriodMsc = 0;
+datetime g_dTimes[];             // candles fechados do pedido, em ordem
+int      g_dNext = -1;           // próximo candle a calcular (do mais novo ao mais antigo)
+int      g_dTries = 0;
 string   g_lastPositions = "";
 string   g_lastOrders = "";
 string   g_lastAccount = "";
@@ -133,6 +148,11 @@ void Disconnect()
    ArrayResize(g_hCount, 0);
    ArrayResize(g_hBefore, 0);
    ArrayResize(g_hTries, 0);
+   ArrayResize(g_qSym, 0);
+   ArrayResize(g_qTf, 0);
+   ArrayResize(g_qCount, 0);
+   ArrayResize(g_qRow, 0);
+   g_dNext = -1;
    g_nextConnect = GetTickCount64() + RECONNECT_MS;
   }
 
@@ -745,6 +765,137 @@ void ProbeObjects(const string j)
    Send("{\"t\":\"objects\",\"id\":" + IntegerToString(id) + ",\"items\":[" + items + "]}\n");
   }
 
+//+------------------------------------------------------------------+
+//| Delta de volume (compras - vendas) por candle, pela regra do tick |
+//| sobre o preço médio (bid+ask)/2: subiu = compra, caiu = venda,     |
+//| igual = mesmo lado do anterior; cada tick conta 1 (CFD não tem     |
+//| lado nem volume real). Com flags de compra/venda e volume real     |
+//| (bolsa), usa os dados reais. A regra recomeça a cada candle.       |
+//+------------------------------------------------------------------+
+struct SDelta
+  {
+   double buy, sell, prevMid;
+   int    dir;
+   long   ticks;
+   // POC: volume por nível de altura row (chave = floor(bid / row)); a POC é o primeiro nível a
+   // passar estritamente o volume da POC anterior
+   double row;
+   long   keys[];
+   double vols[];
+   int    poc;
+   void   Reset(const double r) { buy = 0; sell = 0; prevMid = 0; dir = 0; ticks = 0; row = r; ArrayResize(keys, 0); ArrayResize(vols, 0); poc = -1; }
+   void   Count(const double bid, const double v)
+     {
+      if(row <= 0.0 || v <= 0.0)
+         return;
+      long key = (long)MathFloor(bid / row + 1e-9);
+      int n = ArraySize(keys), r = -1;
+      for(int i = 0; i < n && r < 0; i++)
+         if(keys[i] == key)
+            r = i;
+      if(r < 0)
+        {
+         ArrayResize(keys, n + 1, 16);
+         ArrayResize(vols, n + 1, 16);
+         keys[n] = key;
+         vols[n] = 0;
+         r = n;
+        }
+      vols[r] += v;
+      if(poc < 0 || vols[r] > vols[poc])
+         poc = r;
+     }
+   double PocPrice() { return(poc < 0 ? 0.0 : ((double)keys[poc] + 0.5) * row); }
+   void   Add(const MqlTick &tk)
+     {
+      if(tk.bid <= 0.0)
+         return;
+      ticks++;
+      bool isBuy = (tk.flags & TICK_FLAG_BUY) != 0, isSell = (tk.flags & TICK_FLAG_SELL) != 0;
+      if((isBuy || isSell) && tk.volume_real > 0)
+        {
+         if(isBuy)  buy += tk.volume_real;
+         if(isSell) sell += tk.volume_real;
+         Count(tk.bid, tk.volume_real);
+         return;
+        }
+      double mid = tk.ask > 0.0 ? (tk.bid + tk.ask) / 2.0 : tk.bid;
+      if(prevMid > 0.0)
+        {
+         if(mid > prevMid)      dir = 1;
+         else if(mid < prevMid) dir = -1;
+        }
+      prevMid = mid;
+      if(dir > 0)      buy += 1.0;
+      else if(dir < 0) sell += 1.0;
+      // ticks antes do primeiro movimento não têm lado: ficam fora do perfil, como do delta
+      if(dir != 0)
+         Count(tk.bid, 1.0);
+     }
+  };
+
+//--- começa o próximo pedido da fila: os count candles fechados mais recentes
+void StartDelta()
+  {
+   while(g_dNext < 0 && ArraySize(g_qSym) > 0)
+     {
+      g_dSym = g_qSym[0];
+      g_dTf = g_qTf[0];
+      int count = g_qCount[0];
+      g_dRow = g_qRow[0];
+      ArrayRemove(g_qSym, 0, 1);
+      ArrayRemove(g_qTf, 0, 1);
+      ArrayRemove(g_qCount, 0, 1);
+      ArrayRemove(g_qRow, 0, 1);
+      ENUM_TIMEFRAMES period = TfFromLabel(g_dTf);
+      if(period == PERIOD_CURRENT || !SymbolSelect(g_dSym, true))
+         continue;
+      g_dPeriodMsc = (long)PeriodSeconds(period) * 1000;
+      int n = CopyTime(g_dSym, period, 1, count, g_dTimes);
+      g_dNext = n > 0 ? n - 1 : -1;
+      g_dTries = 0;
+     }
+  }
+
+//--- um bloco: os candles pendentes seguidos que cabem em 6 horas, numa só leitura de ticks
+void DeltaStep()
+  {
+   StartDelta();
+   if(g_dNext < 0)
+      return;
+   int k = g_dNext, j = k;
+   long endMsc = (long)g_dTimes[k] * 1000 + g_dPeriodMsc;
+   while(j > 0 && endMsc - (long)g_dTimes[j - 1] * 1000 <= DELTA_CHUNK_MSC)
+      j--;
+   MqlTick ticks[];
+   int got = CopyTicksRange(g_dSym, ticks, COPY_TICKS_ALL, (ulong)g_dTimes[j] * 1000, (ulong)endMsc - 1);
+   if(got <= 0 && ++g_dTries < DELTA_TRIES)
+      return; // histórico de ticks ainda baixando: tenta no próximo ciclo
+   g_dTries = 0;
+   string out = "";
+   int pos = 0;
+   for(int m = j; m <= k && got > 0; m++)
+     {
+      long from = (long)g_dTimes[m] * 1000, to = from + g_dPeriodMsc;
+      SDelta d;
+      d.Reset(g_dRow);
+      while(pos < got && (long)ticks[pos].time_msc < from)
+         pos++;
+      while(pos < got && (long)ticks[pos].time_msc < to)
+         d.Add(ticks[pos++]);
+      if(d.ticks == 0)
+         continue;
+      if(out != "")
+         StringAdd(out, ",");
+      int digits = (int)SymbolInfoInteger(g_dSym, SYMBOL_DIGITS);
+      StringAdd(out, "[" + IntegerToString((long)g_dTimes[m]) + "," + DoubleToString(d.buy, 2) + "," + DoubleToString(d.sell, 2) +
+                (g_dRow > 0 ? "," + DoubleToString(d.PocPrice(), digits + 2) : "") + "]");
+     }
+   if(out != "")
+      Send("{\"t\":\"delta\",\"symbol\":\"" + Esc(g_dSym) + "\",\"tf\":\"" + g_dTf + "\",\"bars\":[" + out + "]}\n");
+   g_dNext = j - 1;
+  }
+
 void Handle(const string line)
   {
    string t = JStr(line, "t");
@@ -780,6 +931,18 @@ void Handle(const string line)
      }
    else if(t == "probe")
       Probe(line);
+   else if(t == "delta")
+     {
+      int k = ArraySize(g_qSym);
+      ArrayResize(g_qSym, k + 1);
+      ArrayResize(g_qTf, k + 1);
+      ArrayResize(g_qCount, k + 1);
+      ArrayResize(g_qRow, k + 1);
+      g_qRow[k] = JNum(line, "row");
+      g_qSym[k] = JStr(line, "symbol");
+      g_qTf[k] = JStr(line, "tf");
+      g_qCount[k] = (int)JInt(line, "count");
+     }
    else if(t == "objects")
       ProbeObjects(line);
    else
@@ -874,6 +1037,9 @@ void OnTimer()
       g_nextState = GetTickCount64() + STATE_MS;
       SendState(false);
      }
+   // por último, e uma leitura por ciclo: ticks e ordens não esperam pelo delta
+   if(g_sock != INVALID_HANDLE)
+      DeltaStep();
   }
 
 void OnTick()

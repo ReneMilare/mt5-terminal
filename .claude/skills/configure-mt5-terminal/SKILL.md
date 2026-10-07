@@ -23,6 +23,10 @@ salvar. Para ações imediatas existe `mt5-terminal ctl`, como o `hyprctl` do Hy
 | `chart.layers` | as 4 camadas, de trás para a frente: `levels`, `indicators`, `trades`, `price` (padrão: preço na frente) |
 | `chart.show_studies` | indicadores do preset |
 | `chart.first_bars` | candles do primeiro bloco (100–20000); mais antigos vêm conforme o usuário volta no tempo |
+| `chart.cursor` | `arrow` (seta), `hand` (mão para arrastar), `cross` (cruz: arrastar mede % e barras; Esc limpa) |
+| `fibonacci.enabled` | Fibonacci M5/M15/H1/D1 no mapa do preset |
+| `fibonacci.lookback`, `fibonacci.pivot_bars` | 20–2000 candles fechados de busca; 1–10 candles fechados de cada lado para confirmar pivôs (padrão 300 / 2) |
+| `fibonacci.levels` | 1–12 frações únicas entre 0 e 1; padrão `[0.236, 0.382, 0.5, 0.618, 0.786]` |
 | `mt5.auto_start` | abrir o MetaTrader 5 junto se ele estiver fechado |
 | `mt5.command` | comando que abre o MT5 (lista); vazio = como o atalho do MT5 |
 | `colors.background/panel/grid/text/accent` | `"#rrggbb"`: fundo do gráfico, painéis, grade, texto, destaque |
@@ -30,6 +34,7 @@ salvar. Para ações imediatas existe `mt5-terminal ctl`, como o `hyprctl` do Hy
 | `colors.candle_up/candle_down`, `colors.wick_up/wick_down` | corpo e contorno/pavio dos candles; corpo da cor do fundo = vazado |
 | `[[presets]]` | `name`, `volume`, `stop`, `target` (0 = sem), `unit` (`percent` da entrada ou `points`): operações predefinidas da boleta |
 | `ticket.preset` | nome da operação ativa; vazio = Manual |
+| `ui.ticket_open`, `ui.pane_open` | boleta aberta / recolhida; painel do preset aberto / minimizado |
 | `[[accounts]]` | `name`, `login`, `server`, `kind` (`demo`/`real`): contas da troca pela barra de status; o app as anota sozinho; **nunca** grave senha |
 
 O app relê o arquivo em até meio segundo enquanto a janela está sendo desenhada; com a janela num
@@ -40,7 +45,7 @@ workspace escondido, aplica quando ela voltar a aparecer.
 Respondem na hora mesmo com a janela escondida. Saída `erro: ...` (código 1) em falha.
 
 - `ctl state` — JSON: símbolo, timeframe, fonte, conexão, conta (`kind`: `demo`/`real`), candles,
-  camadas, indicadores, posições, ordens, status. Use para conferir o efeito de uma mudança.
+  camadas, indicadores, Fibonacci (âncoras/níveis por timeframe), posições, ordens, status. Use para conferir o efeito de uma mudança.
 - `ctl symbol <S>`, `ctl tf <TF>` — muda o gráfico agora (não altera o padrão do arquivo).
 - `ctl studies on|off`, `ctl front <camada>`, `ctl layers a,b,c,d` — gravam no config.toml.
 - `ctl reload` — relê o arquivo. `ctl config` — caminho. `ctl help` — lista.

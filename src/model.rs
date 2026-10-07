@@ -129,10 +129,117 @@ impl Series {
     }
 }
 
+/// Buy/sell volume per bar by the tick rule over the mid price ((bid+ask)/2): up = buy, down = sell,
+/// unchanged = the previous side; each tick counts 1; the rule restarts at every bar; ticks before
+/// the bar's first move have no side and count nowhere. With a `row` it also keeps the bar's POC:
+/// counted ticks binned by `floor(bid / row)`, the first level to strictly pass the previous POC.
+/// Closed bars come exact from the EA; the forming bar is built here from the streamed ticks.
+#[derive(Default)]
+pub struct Deltas {
+    /// bar open time -> (buy, sell, poc price or NaN)
+    pub bars: std::collections::BTreeMap<i64, (f64, f64, f64)>,
+    live: Option<LiveDelta>,
+    /// Price level height of the POC (0 = no POC).
+    pub row: f64,
+    /// Bumped on every change, so readers recompute only when needed.
+    pub version: u64,
+    /// Bumped when anything but the forming bar changes (EA batch, a bar closing, the row): between
+    /// two bumps, readers only refresh the forming bar.
+    pub closed: u64,
+}
+
+#[derive(Clone)]
+struct LiveDelta {
+    time: i64,
+    buy: f64,
+    sell: f64,
+    prev_mid: f64,
+    dir: i8,
+    levels: std::collections::HashMap<i64, f64>,
+    poc: Option<i64>,
+}
+
+impl LiveDelta {
+    fn poc_price(&self, row: f64) -> f64 {
+        match self.poc {
+            Some(k) if row > 0.0 => (k as f64 + 0.5) * row,
+            _ => f64::NAN,
+        }
+    }
+}
+
+// read by presets (none compiled in: unused)
+#[cfg_attr(not(has_preset), allow(dead_code))]
+impl Deltas {
+    /// buy − sell of the bar opening at `time` (the forming one included).
+    pub fn value(&self, time: i64) -> Option<f64> {
+        match &self.live {
+            Some(l) if l.time == time => Some(l.buy - l.sell),
+            _ => self.bars.get(&time).map(|(b, s, _)| b - s),
+        }
+    }
+
+    /// POC price of the bar opening at `time` (the forming one included).
+    pub fn poc(&self, time: i64) -> Option<f64> {
+        let p = match &self.live {
+            Some(l) if l.time == time => l.poc_price(self.row),
+            _ => self.bars.get(&time)?.2,
+        };
+        p.is_finite().then_some(p)
+    }
+
+    fn tick(&mut self, bar: i64, bid: f64, ask: f64) {
+        if bid <= 0.0 {
+            return;
+        }
+        let row = self.row;
+        let l = match &mut self.live {
+            Some(l) if l.time == bar => l,
+            other => {
+                // the bar closed: keep the estimate until the EA sends the exact value
+                if let Some(old) = other.take() {
+                    let poc = old.poc_price(row);
+                    self.bars.entry(old.time).or_insert((old.buy, old.sell, poc));
+                    self.closed += 1;
+                }
+                self.live.insert(LiveDelta { time: bar, buy: 0.0, sell: 0.0, prev_mid: 0.0, dir: 0, levels: Default::default(), poc: None })
+            }
+        };
+        let mid = if ask > 0.0 { (bid + ask) / 2.0 } else { bid };
+        if l.prev_mid > 0.0 {
+            if mid > l.prev_mid {
+                l.dir = 1;
+            } else if mid < l.prev_mid {
+                l.dir = -1;
+            }
+        }
+        l.prev_mid = mid;
+        match l.dir {
+            1 => l.buy += 1.0,
+            -1 => l.sell += 1.0,
+            _ => {}
+        }
+        if row > 0.0 && l.dir != 0 {
+            let key = (bid / row + 1e-9).floor() as i64;
+            let v = {
+                let e = l.levels.entry(key).or_insert(0.0);
+                *e += 1.0;
+                *e
+            };
+            let best = l.poc.and_then(|k| l.levels.get(&k)).copied().unwrap_or(0.0);
+            if l.poc.is_none() || v > best {
+                l.poc = Some(key);
+            }
+        }
+        self.version += 1;
+    }
+}
+
 /// Every series the app keeps, by symbol and timeframe. Ticks extend all series of their symbol.
 #[derive(Default)]
 pub struct Store {
     series: std::collections::HashMap<(String, Timeframe), Series>,
+    deltas: std::collections::HashMap<(String, Timeframe), Deltas>,
 }
 
 impl Store {
@@ -164,12 +271,44 @@ impl Store {
         }
     }
 
+    /// Start keeping the delta (and the POC, with `row` > 0) of `symbol`/`tf`: from now on its ticks feed it.
+    pub fn track_delta(&mut self, symbol: &str, tf: Timeframe, row: f64) {
+        let d = self.deltas.entry((symbol.to_string(), tf)).or_default();
+        d.row = row;
+        d.closed += 1;
+    }
+
+    pub fn deltas(&self, symbol: &str, tf: Timeframe) -> Option<&Deltas> {
+        self.deltas.get(&(symbol.to_string(), tf))
+    }
+
+    /// Exact closed bars from the EA (they replace the live estimates).
+    pub fn put_delta(&mut self, symbol: &str, tf: Timeframe, bars: &[Vec<f64>]) {
+        let d = self.deltas.entry((symbol.to_string(), tf)).or_default();
+        for b in bars.iter().filter(|b| b.len() >= 3) {
+            let poc = b.get(3).copied().filter(|p| *p > 0.0).unwrap_or(f64::NAN);
+            d.bars.insert(b[0] as i64, (b[1], b[2], poc));
+        }
+        d.version += 1;
+        d.closed += 1;
+    }
+
+    /// A tick with both sides of the quote, for the deltas of its symbol.
+    pub fn tick_quote(&mut self, symbol: &str, time_msc: i64, bid: f64, ask: f64) {
+        for ((s, tf), d) in self.deltas.iter_mut() {
+            if s == symbol {
+                d.tick(tf.bar_open(time_msc.div_euclid(1000)), bid, ask);
+            }
+        }
+    }
+
     pub fn keys(&self) -> impl Iterator<Item = &(String, Timeframe)> {
         self.series.keys()
     }
 
     pub fn clear(&mut self) {
         self.series.clear();
+        self.deltas.clear();
     }
 }
 
@@ -196,6 +335,27 @@ mod tests {
         assert_eq!(s.bars[0], Bar { time: 900, open: 10.0, high: 12.0, low: 9.0, close: 9.0, volume: 3.0 });
         assert_eq!(s.bars[1].time, 1200);
         assert_eq!(s.last, Some(11.0));
+    }
+
+    #[test]
+    fn delta_by_tick_rule() {
+        let mut st = Store::default();
+        st.track_delta("X", Timeframe::M1, 0.5);
+        // first tick only sets the mid; up, same (keeps buying), down, down
+        for (ms, bid) in [(0, 10.0), (1000, 10.5), (2000, 10.5), (3000, 10.0), (4000, 9.5)] {
+            st.tick_quote("X", ms, bid, bid + 0.5);
+        }
+        let d = st.deltas("X", Timeframe::M1).unwrap();
+        assert_eq!(d.value(0), Some(2.0 - 2.0));
+        // a new bar restarts the rule; the closed one keeps the estimate until the EA's value
+        st.tick_quote("X", 61_000, 9.0, 9.5);
+        let d = st.deltas("X", Timeframe::M1).unwrap();
+        assert_eq!((d.value(0), d.value(60)), (Some(0.0), Some(0.0)));
+        // POC of the closed bar from the ticks: counted bids 10.5, 10.5, 10.0, 9.5 -> level 21 (2 ticks)
+        assert_eq!(st.deltas("X", Timeframe::M1).unwrap().poc(0), Some(10.75));
+        st.put_delta("X", Timeframe::M1, &[vec![0.0, 7.0, 3.0, 9.25]]);
+        let d = st.deltas("X", Timeframe::M1).unwrap();
+        assert_eq!((d.value(0), d.poc(0)), (Some(4.0), Some(9.25)));
     }
 
     #[test]

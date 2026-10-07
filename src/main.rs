@@ -18,15 +18,15 @@ mod studies;
 mod theme;
 mod trading;
 
-use chart::{ChartData, ChartView, Layer};
-use history::{Loader, Need};
-use settings::Settings;
+use chart::{ChartData, ChartView, CursorMode, Layer};
 use eframe::egui::{self, Align, Color32, Layout, RichText};
 use feed::{Command, Event, Feed, Message};
-use studies::Studies;
+use history::{Loader, Need};
 use model::{Series, Store, Timeframe};
+use settings::Settings;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use studies::Studies;
 use theme::Palette;
 use trading::Trading;
 
@@ -48,6 +48,8 @@ struct Account {
 }
 
 struct App {
+    /// `MT5_TERMINAL_PERF=1`: frame times on stderr every 5 s.
+    perf: Option<Perf>,
     pal: Palette,
     wake: egui::Context,
     bridge: Option<Feed>,
@@ -71,6 +73,11 @@ struct App {
     /// Last (bid, tick time in ms) of every symbol.
     quotes: HashMap<String, (f64, i64)>,
     last_resync: Instant,
+    /// Newest chart bar seen, to finalize the delta of the bar that closed.
+    delta_last_bar: i64,
+    /// Closed bars of delta the studies want, and whether they were asked for (needs the POC row).
+    delta_want: u32,
+    delta_requested: bool,
     #[cfg(has_preset)]
     verify: Option<preset::verify::Verify>,
     /// MetaTrader 5 was started by the app and hasn't connected yet.
@@ -117,6 +124,7 @@ impl App {
             }
         };
         let mut app = Self {
+            perf: std::env::var_os("MT5_TERMINAL_PERF").map(|_| Perf::default()),
             pal,
             wake: ctx,
             bridge,
@@ -125,7 +133,7 @@ impl App {
             source: Source::Mt5,
             connected: false,
             account: None,
-            studies: Studies::new(&symbol, tf),
+            studies: Studies::new(&symbol, tf, &settings.fibonacci),
             symbol,
             tf,
             store: Store::default(),
@@ -137,6 +145,9 @@ impl App {
             loader: Loader::default(),
             quotes: HashMap::new(),
             last_resync: Instant::now(),
+            delta_last_bar: 0,
+            delta_want: 0,
+            delta_requested: false,
             #[cfg(has_preset)]
             verify: args.verify.map(preset::verify::Verify::new),
             mt5_starting: false,
@@ -192,8 +203,9 @@ impl App {
 
     fn clear_chart(&mut self) {
         self.view.reset();
+        self.delta_last_bar = 0;
         self.last_tick = None;
-        self.studies = Studies::new(&self.symbol, self.tf);
+        self.studies = Studies::new(&self.symbol, self.tf, &self.settings.fibonacci);
     }
 
     fn series(&self) -> Option<&Series> {
@@ -206,6 +218,9 @@ impl App {
         let mut symbols = vec![self.symbol.clone()];
         symbols.extend(needs.symbols.into_iter().filter(|s| *s != self.symbol));
         let mut cmds = vec![Command::Subscribe { symbols }];
+        // the delta goes out once the studies know the POC level height (it needs the bars)
+        self.delta_want = needs.delta_bars;
+        self.delta_requested = false;
         let (store, loader) = (&self.store, &mut self.loader);
         cmds.extend(loader.first(store, &self.symbol, self.tf, self.settings.chart.first_bars));
         for (symbol, tf, count) in needs.first {
@@ -232,6 +247,23 @@ impl App {
             }
         }
         self.send_all(cmds);
+    }
+
+    /// A chart bar closed: ask the EA for its exact delta (the live one is built from the streamed
+    /// ticks, which may skip ticks of the same millisecond).
+    fn finalize_delta(&mut self) {
+        let Some(last) = self.series().and_then(|s| s.bars.last()).map(|b| b.time) else { return;
+        };
+        if last == self.delta_last_bar {
+            return;
+        }
+        let first = self.delta_last_bar == 0;
+        self.delta_last_bar = last;
+        if !first && self.connected && self.store.deltas(&self.symbol, self.tf).is_some() {
+            let row = self.store.deltas(&self.symbol, self.tf).map(|d| d.row).unwrap_or(0.0);
+            let cmd = Command::Delta { symbol: self.symbol.clone(), tf: self.tf, count: 2, row };
+            self.send_all(vec![cmd]);
+        }
     }
 
     /// Re-fetch the last bars of every series (corrects volumes and closes built from ticks).
@@ -297,8 +329,8 @@ impl App {
                 }
                 Event::Message(msg) if self.trading.on_message(&msg, &self.symbol) => {
                     // a tick also feeds the chart
-                    if let Message::Tick { symbol, time_msc, bid, volume, .. } = msg {
-                        self.on_tick(&symbol, time_msc, bid, volume);
+                    if let Message::Tick { symbol, time_msc, bid, ask, volume } = msg {
+                        self.on_tick(&symbol, time_msc, bid, ask, volume);
                     }
                 }
                 Event::Message(Message::Hello { server, login, account, version, netting, .. }) => {
@@ -334,15 +366,24 @@ impl App {
                         v.on_message(&msg, bars, &self.studies);
                     }
                 }
-                Event::Message(Message::Tick { symbol, time_msc, bid, volume, .. }) => self.on_tick(&symbol, time_msc, bid, volume),
+                Event::Message(Message::Tick { symbol, time_msc, bid, ask, volume }) => {
+                    if let Some(p) = &mut self.perf {
+                        p.ticks += 1;
+                    }
+                    self.on_tick(&symbol, time_msc, bid, ask, volume)
+                }
+                Event::Message(Message::Delta { symbol, tf, bars }) => {
+                    self.store.put_delta(&symbol, tf, &bars)
+                }
                 Event::Message(Message::Error { msg }) => self.status = Some(msg),
                 Event::Message(_) => {}
             }
         }
     }
 
-    fn on_tick(&mut self, symbol: &str, time_msc: i64, bid: f64, volume: f64) {
+    fn on_tick(&mut self, symbol: &str, time_msc: i64, bid: f64, ask: f64, volume: f64) {
         self.store.tick(symbol, time_msc.div_euclid(1000), bid, volume);
+        self.store.tick_quote(symbol, time_msc, bid, ask);
         self.quotes.insert(symbol.to_string(), (bid, time_msc));
         if symbol == self.symbol {
             self.last_tick = Some((time_msc, Instant::now()));
@@ -393,6 +434,20 @@ impl App {
                 self.select(symbol.as_deref(), tf);
             }
 
+            ui.separator();
+            let mut cursor = self.settings.chart.cursor;
+            for mode in CursorMode::ALL {
+                if mode.button(ui, cursor == mode).clicked() {
+                    cursor = mode;
+                }
+            }
+            if cursor != self.settings.chart.cursor {
+                self.settings.chart.cursor = cursor;
+                if let Err(e) = settings::save_cursor(cursor) {
+                    self.status = Some(format!("não gravou o config.toml: {e}"));
+                }
+                self.config_mtime = settings::mtime();
+            }
             ui.separator();
             let studies = ui
                 .toggle_value(&mut self.settings.chart.show_studies, "Indicadores")
@@ -468,7 +523,11 @@ impl App {
                 self.pal = s.palette();
                 theme::apply(&self.wake, &self.pal);
                 self.trading.set_presets(&s.presets, &s.ticket.preset);
+                let fibonacci_changed = self.studies.configure_fibonacci(&s.fibonacci);
                 self.settings = s;
+                if fibonacci_changed && self.connected {
+                    self.request();
+                }
                 self.status = (!warnings.is_empty()).then(|| format!("config: {}", warnings.join("; ")));
             }
             Err(e) => self.status = Some(format!("config.toml inválido (mantida a anterior): {e}")),
@@ -477,7 +536,8 @@ impl App {
 
     /// Apply what `ctl` queued and publish the state it reports (a few times a second).
     fn serve_control(&mut self) {
-        let Some((rx, shared)) = self.control.clone() else { return };
+        let Some((rx, shared)) = self.control.clone() else { return;
+        };
         if let Ok(mut t) = shared.last_frame.lock() {
             *t = Instant::now();
         }
@@ -509,6 +569,8 @@ impl App {
             "candles": self.series().map(|s| s.bars.len()).unwrap_or(0),
             "studies": self.settings.chart.show_studies,
             "layers": self.settings.chart.layers.iter().map(|l| l.key()).collect::<Vec<_>>(),
+            "cursor": self.settings.chart.cursor.key(),
+            "fibonacci": self.studies.fibonacci_state(),
             "positions": self.trading.positions.len(),
             "orders": self.trading.orders.len(),
             "config": settings::path(),
@@ -586,6 +648,13 @@ impl App {
         }
     }
 
+    fn save_ui_state(&mut self) {
+        if let Err(e) = settings::save_ui_state(&self.settings.ui) {
+            self.status = Some(format!("não gravou o config.toml: {e}"));
+        }
+        self.config_mtime = settings::mtime();
+    }
+
     /// Remember the preset chosen in the ticket, and run the presets editor.
     fn presets_ui(&mut self, ctx: &egui::Context) {
         if self.trading.active_name() != self.settings.ticket.preset {
@@ -659,7 +728,10 @@ impl App {
             }
             if changed {
                 // names may have changed: keep the active one by position when its name was edited
-                let keep = self.trading.preset.filter(|&i| remove != Some(i)).map(|i| if remove.is_some_and(|r| r < i) { i - 1 } else { i });
+                let keep = self.trading.preset.filter(|&i| remove != Some(i)).map(|i| {
+                    if remove.is_some_and(|r| r < i) { i - 1 } else { i
+                    }
+                });
                 let name = keep.and_then(|i| self.settings.presets.get(i)).map(|p| p.name.clone()).unwrap_or(active);
                 self.trading.set_presets(&self.settings.presets, &name);
                 self.presets_dirty = true;
@@ -693,7 +765,8 @@ impl App {
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
-        let Some(target) = self.confirm_switch.clone() else { return };
+        let Some(target) = self.confirm_switch.clone() else { return;
+        };
         let mut decision = None;
         let modal = egui::Modal::new(egui::Id::new("confirm-real")).show(ctx, |ui| {
             ui.set_width(380.0);
@@ -787,7 +860,59 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let started = self.perf.is_some().then(std::time::Instant::now);
+        self.frame(ui);
+        if let (Some(p), Some(t)) = (&mut self.perf, started) {
+            p.frame(t.elapsed(), frame.info().cpu_usage);
+        }
+    }
+}
+
+/// Frame-time diagnostics (only with `MT5_TERMINAL_PERF=1`).
+#[derive(Default)]
+struct Perf {
+    since: Option<std::time::Instant>,
+    /// `ui()` time of each frame in the window, µs.
+    ui_us: Vec<u32>,
+    /// Whole CPU time of the previous frames (ui + tessellation + paint submit), µs.
+    cpu_us: Vec<u32>,
+    ticks: u32,
+}
+
+impl Perf {
+    fn frame(&mut self, ui: std::time::Duration, cpu: Option<f32>) {
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        self.ui_us.push(ui.as_micros() as u32);
+        if let Some(c) = cpu {
+            self.cpu_us.push((c * 1e6) as u32);
+        }
+        let span = since.elapsed().as_secs_f64();
+        if span < 5.0 {
+            return;
+        }
+        let stats = |v: &mut Vec<u32>| {
+            v.sort_unstable();
+            let n = v.len().max(1);
+            let avg = v.iter().map(|&x| x as u64).sum::<u64>() / n as u64;
+            let pct = |q: f64| {
+                v.get(((n as f64 * q) as usize).min(n - 1)).copied().unwrap_or(0)
+            };
+            format!("méd {avg} µs · p99 {} µs · máx {} µs", pct(0.99), v.last().copied().unwrap_or(0))
+        };
+        eprintln!(
+            "perf: {:.1} quadros/s · {:.1} ticks/s · ui {} · cpu {}",
+            self.ui_us.len() as f64 / span,
+            self.ticks as f64 / span,
+            stats(&mut self.ui_us),
+            stats(&mut self.cpu_us)
+        );
+        *self = Perf::default();
+    }
+}
+
+impl App {
+    fn frame(&mut self, ui: &mut egui::Ui) {
         self.watch_config();
         self.serve_control();
         let ctx = ui.ctx().clone();
@@ -804,12 +929,36 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(self.pal.panel_bg).inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ui, |ui| self.status_bar(ui));
         let (connected, real) = (self.connected, self.is_real());
+        let keys = self.trading.shortcuts(ui.ctx(), &self.symbol, connected, real);
+        self.send_all(keys);
+        // the ticket, or a thin strip when collapsed
+        let open = self.settings.ui.ticket_open;
+        let mut toggle = false;
         let cmds = egui::Panel::right("ticket")
-            .exact_size(250.0)
+            .exact_size(if open { 250.0 } else { 26.0 })
             .resizable(false)
-            .frame(egui::Frame::new().fill(self.pal.panel_bg).inner_margin(egui::Margin::symmetric(12, 0)))
-            .show(ui, |ui| self.trading.ticket_ui(ui, &self.pal, &self.symbol, connected, real))
+            .frame(egui::Frame::new().fill(self.pal.panel_bg).inner_margin(egui::Margin::symmetric(if open { 12 } else { 2 }, 0)))
+            .show(ui, |ui| {
+                if open {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Boleta").color(self.pal.text_dim).size(12.0));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            toggle = ui.small_button("»").on_hover_text("Recolher a boleta").clicked();
+                        });
+                    });
+                    self.trading.ticket_ui(ui, &self.pal, &self.symbol, connected, real)
+                } else {
+                    ui.add_space(6.0);
+                    toggle = ui.add_sized([22.0, 40.0], egui::Button::new("«")).on_hover_text("Abrir a boleta").clicked();
+                    Vec::new()
+                }
+            })
             .inner;
+        if toggle {
+            self.settings.ui.ticket_open = !open;
+            self.save_ui_state();
+        }
         self.send_all(cmds);
         if !self.trading.positions.is_empty() || !self.trading.orders.is_empty() {
             let can_trade = self.trading.can_trade(connected, real);
@@ -824,16 +973,25 @@ impl eframe::App for App {
         self.resync();
         let server_now = self.server_now();
         if !self.studies.is_for(&self.symbol, self.tf) {
-            self.studies = Studies::new(&self.symbol, self.tf);
+            self.studies = Studies::new(&self.symbol, self.tf, &self.settings.fibonacci);
         }
         self.load_more();
+        self.finalize_delta();
         let warm = self.loader.ready(&self.store, &self.symbol, self.tf, Studies::warmup(self.tf));
         if self.settings.chart.show_studies {
             let digits = self.series().map(|s| s.digits).unwrap_or(2);
             let quotes = &self.quotes;
-            self.studies.update(&self.store, digits, warm, server_now.map(|t| t as i64), |s| {
-                quotes.get(s).map(|&(bid, ms)| (bid, ms.div_euclid(1000)))
-            });
+            let tick = self.trading.tick_size();
+            self.studies.update(&self.store, digits, tick, warm, server_now.map(|t| t as i64), |s| quotes.get(s).map(|&(bid, ms)| (bid, ms.div_euclid(1000))),
+            );
+        }
+        if self.delta_want > 0 && !self.delta_requested && self.connected
+            && let Some(row) = self.studies.delta_row()
+        {
+            self.delta_requested = true;
+            self.store.track_delta(&self.symbol, self.tf, row);
+            let cmd = Command::Delta { symbol: self.symbol.clone(), tf: self.tf, count: self.delta_want, row };
+            self.send_all(vec![cmd]);
         }
         #[cfg(has_preset)]
         if let Some(v) = self.verify.as_mut() {
@@ -850,10 +1008,10 @@ impl eframe::App for App {
         let can_trade = self.trading.can_trade(self.connected, self.is_real());
         let positions = self.trading.levels(&self.symbol, &self.pal, can_trade);
         let show = self.settings.chart.show_studies;
-        let (overlays, map_levels, pane) = if show {
-            (self.studies.overlays(), self.studies.map_levels(), self.studies.pane())
+        let (overlays, map_levels, pane, volume, marks) = if show {
+            (self.studies.overlays(), self.studies.map_levels(), self.studies.pane(), self.studies.volume(), self.studies.marks())
         } else {
-            (Vec::new(), Vec::new(), None)
+            (Vec::new(), Vec::new(), None, None, None)
         };
         let volume_text = self.trading.volume_text();
         let empty = Series::default();
@@ -867,19 +1025,32 @@ impl eframe::App for App {
                 overlays: &overlays,
                 map_levels: &map_levels,
                 pane: pane.as_ref(),
+                pane_open: self.settings.ui.pane_open,
                 layers: &self.settings.chart.layers,
-                quote: self.trading.quote.filter(|_| can_trade),
+                quote: self.trading.quote,
+                can_trade,
+                cursor: self.settings.chart.cursor,
                 tick: self.trading.tick_size(),
                 order_volume: &volume_text,
                 bracket: Some(self.trading.bracket()),
+                volume,
+                marks,
             };
             self.view.ui(ui, &data, &self.pal);
         });
-        if can_trade {
-            let actions = std::mem::take(&mut self.view.actions);
-            let cmds: Vec<Command> = actions.into_iter().filter_map(|a| self.trading.chart_action(a, &self.symbol)).collect();
-            self.send_all(cmds);
+        let actions = std::mem::take(&mut self.view.actions);
+        let mut cmds: Vec<Command> = Vec::new();
+        for a in actions {
+            match a {
+                chart::ChartAction::TogglePane => {
+                    self.settings.ui.pane_open = !self.settings.ui.pane_open;
+                    self.save_ui_state();
+                }
+                a if can_trade => cmds.extend(self.trading.chart_action(a, &self.symbol)),
+                _ => {}
+            }
         }
+        self.send_all(cmds);
     }
 }
 

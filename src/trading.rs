@@ -236,7 +236,9 @@ impl Trading {
         let (bid, ask) = self.quote?;
         let price = round_to(price, spec.tick_size);
         let entry = match kind {
-            OrderKind::Market => if side == Side::Buy { ask } else { bid },
+            OrderKind::Market => {
+                if side == Side::Buy { ask } else { bid }
+            }
             _ => price,
         };
         let (sl, tp) = self.bracket().levels(side, entry, spec.tick_size);
@@ -302,6 +304,7 @@ impl Trading {
         let tick = self.spec.as_ref()?.tick_size;
         match action {
             ChartAction::Order { side, kind, price } => self.order_at(symbol, side, kind, price),
+            ChartAction::TogglePane => None,
             ChartAction::Remove { handle } => match handle {
                 Handle::Order(ticket) => {
                     self.orders.iter().any(|o| o.ticket == ticket).then_some(())?;
@@ -313,7 +316,9 @@ impl Trading {
                         .iter()
                         .find(|p| p.ticket == t)
                         .map(|p| (0.0, p.sl, p.tp))
-                        .or_else(|| self.orders.iter().find(|o| o.ticket == t).map(|o| (o.price, o.sl, o.tp)))?;
+                        .or_else(|| {
+                            self.orders.iter().find(|o| o.ticket == t).map(|o| (o.price, o.sl, o.tp))
+                        })?;
                     let is_sl = matches!(handle, Handle::Sl(_));
                     let (sl, tp) = if is_sl { (0.0, tp) } else { (sl, 0.0) };
                     let what = format!("Tirar {} #{t}", if is_sl { "stop" } else { "alvo" });
@@ -350,7 +355,9 @@ impl Trading {
                             .iter()
                             .find(|p| p.ticket == t)
                             .map(|p| (0.0, p.sl, p.tp))
-                            .or_else(|| self.orders.iter().find(|o| o.ticket == t).map(|o| (o.price, o.sl, o.tp)))?;
+                            .or_else(|| {
+                                self.orders.iter().find(|o| o.ticket == t).map(|o| (o.price, o.sl, o.tp))
+                            })?;
                         let is_sl = matches!(handle, Handle::Sl(_));
                         let (sl, tp) = if is_sl { (price, tp) } else { (sl, price) };
                         (t, entry, sl, tp, format!("{} #{t} para {}", if is_sl { "Stop" } else { "Alvo" }, self.fmt_price(price)))
@@ -401,7 +408,9 @@ impl Trading {
                 Bracket { stop: of(p.stop), target: of(p.target) }
             }
             None => {
-                let of = |v: f64| if v > 0.0 { Offset::Points(v) } else { Offset::None };
+                let of = |v: f64| {
+                    if v > 0.0 { Offset::Points(v) } else { Offset::None }
+                };
                 Bracket { stop: of(self.sl_dist), target: of(self.tp_dist) }
             }
         }
@@ -415,7 +424,10 @@ impl Trading {
 
     /// Net volume of `symbol` (buy positive).
     fn net(&self, symbol: &str) -> f64 {
-        self.positions.iter().filter(|p| p.symbol == symbol).map(|p| if p.side == Side::Buy { p.volume } else { -p.volume }).sum()
+        self.positions.iter().filter(|p| p.symbol == symbol).map(|p| {
+                if p.side == Side::Buy { p.volume } else { -p.volume
+                }
+            }).sum()
     }
 
     /// Reverse the net position: one order of twice the volume on netting, flatten + opposite on hedging.
@@ -450,7 +462,8 @@ impl Trading {
     /// past their entry: otherwise the stop would sit on the wrong side of the price and the broker
     /// refuses it, so it says why here instead of sending.
     fn breakeven(&mut self, symbol: &str) -> Vec<Command> {
-        let Some((bid, ask)) = self.quote else { return Vec::new() };
+        let Some((bid, ask)) = self.quote else { return Vec::new();
+        };
         let mut out = Vec::new();
         let positions: Vec<Position> = self.positions.iter().filter(|p| p.symbol == symbol).cloned().collect();
         for p in positions {
@@ -481,6 +494,35 @@ impl Trading {
     }
 
     /// The order ticket (right panel). Returns the commands to send.
+    /// Ctrl+Shift+B/S/Z/R/E: the ticket's buttons, under the same locks, also with the ticket
+    /// collapsed; ignored while typing in a field.
+    pub fn shortcuts(&mut self, ctx: &egui::Context, symbol: &str, connected: bool, real: bool) -> Vec<Command> {
+        let mut out = Vec::new();
+        if ctx.egui_wants_keyboard_input() || self.blocked(connected, real).is_some() {
+            return out;
+        }
+        let key = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, k));
+        if key(egui::Key::B) {
+            out.extend(self.order(symbol, Side::Buy));
+        }
+        if key(egui::Key::S) {
+            out.extend(self.order(symbol, Side::Sell));
+        }
+        let has_any = self.positions.iter().any(|p| p.symbol == symbol) || self.orders.iter().any(|o| o.symbol == symbol);
+        if key(egui::Key::Z) && has_any {
+            let s = symbol.to_string();
+            out.push(self.request(format!("Zerar {symbol}"), |id| Command::Flatten { id, symbol: s }));
+        }
+        let open = self.net(symbol) != 0.0;
+        if key(egui::Key::R) && open {
+            out.extend(self.reverse(symbol));
+        }
+        if key(egui::Key::E) && open {
+            out.extend(self.breakeven(symbol));
+        }
+        out
+    }
+
     pub fn ticket_ui(&mut self, ui: &mut egui::Ui, pal: &Palette, symbol: &str, connected: bool, real: bool) -> Vec<Command> {
         let mut out = Vec::new();
         ui.add_space(10.0);
@@ -590,14 +632,6 @@ impl Trading {
         ui.add_space(6.0);
 
         let blocked = self.blocked(connected, real);
-        // Ctrl+Shift+B/S/Z: same locks as the buttons, ignored while typing in a field
-        let key = |k| ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, k));
-        let typing = ui.ctx().egui_wants_keyboard_input();
-        let (key_buy, key_sell, key_flat, key_reverse, key_be) = if typing {
-            (false, false, false, false, false)
-        } else {
-            (key(egui::Key::B), key(egui::Key::S), key(egui::Key::Z), key(egui::Key::R), key(egui::Key::E))
-        };
         let (bid, ask) = self.quote.unwrap_or((0.0, 0.0));
         let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
         ui.horizontal(|ui| {
@@ -605,9 +639,8 @@ impl Trading {
                 let title = if side == Side::Buy { "COMPRAR" } else { "VENDER" };
                 let text = RichText::new(format!("{title}\n{price:.p$}", p = digits as usize)).strong().size(14.0).color(Color32::WHITE);
                 let btn = egui::Button::new(text).fill(if blocked.is_none() { color } else { pal.tag_bg }).min_size(egui::vec2(half, 52.0));
-                let shortcut = if side == Side::Buy { key_buy } else { key_sell };
                 let hint = if side == Side::Buy { "Ctrl+Shift+B" } else { "Ctrl+Shift+S" };
-                if ui.add_enabled(blocked.is_none(), btn).on_hover_text(hint).clicked() || (shortcut && blocked.is_none()) {
+                if ui.add_enabled(blocked.is_none(), btn).on_hover_text(hint).clicked() {
                     out.extend(self.order(symbol, side));
                 }
             }
@@ -618,7 +651,7 @@ impl Trading {
         let has_any = self.positions.iter().any(|p| p.symbol == symbol) || self.orders.iter().any(|o| o.symbol == symbol);
         let zerar = egui::Button::new(RichText::new(format!("ZERAR {symbol}")).strong()).min_size(egui::vec2(ui.available_width(), 30.0));
         let zerar = ui.add_enabled(blocked.is_none() && has_any, zerar).on_hover_text("Fecha as posições e cancela as ordens do símbolo (Ctrl+Shift+Z)");
-        if zerar.clicked() || (key_flat && blocked.is_none() && has_any) {
+        if zerar.clicked() {
             let s = symbol.to_string();
             out.push(self.request(format!("Zerar {symbol}"), |id| Command::Flatten { id, symbol: s }));
         }
@@ -627,11 +660,11 @@ impl Trading {
         ui.horizontal(|ui| {
             let inverter = egui::Button::new(RichText::new("INVERTER").strong()).min_size(egui::vec2(half, 26.0));
             let hint = if self.netting { "Ordem oposta com o dobro do volume, netting (Ctrl+Shift+R)" } else { "Zera e abre o lado oposto, hedge (Ctrl+Shift+R)" };
-            if ui.add_enabled(open, inverter).on_hover_text(hint).clicked() || (key_reverse && open) {
+            if ui.add_enabled(open, inverter).on_hover_text(hint).clicked() {
                 out.extend(self.reverse(symbol));
             }
             let be = egui::Button::new(RichText::new("BE").strong()).min_size(egui::vec2(half, 26.0));
-            if ui.add_enabled(open, be).on_hover_text("Stop no preço de entrada das posições do símbolo (Ctrl+Shift+E)").clicked() || (key_be && open) {
+            if ui.add_enabled(open, be).on_hover_text("Stop no preço de entrada das posições do símbolo (Ctrl+Shift+E)").clicked() {
                 out.extend(self.breakeven(symbol));
             }
         });

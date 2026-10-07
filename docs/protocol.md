@@ -17,6 +17,7 @@ horários são do servidor do MT5 (barras em segundos, ticks em milissegundos).
 | `close` | `id`, `ticket` | Fecha a posição inteira a mercado |
 | `cancel` | `id`, `ticket` | Remove a ordem pendente |
 | `flatten` | `id`, `symbol` | Cancela as ordens e fecha as posições do símbolo, de qualquer origem |
+| `delta` | `symbol`, `tf`, `count`, `row` (opcional) | Compras e vendas por candle (regra do tick sobre o preço médio, recomeçando a cada candle) dos `count` candles fechados mais recentes, do mais novo ao mais antigo, em lotes `delta`; com `row` > 0, também a POC de cada candle (meio do nível de altura `row` com mais ticks contados); uma leitura de ticks (até 6 h) por ciclo, para não atrasar ordens e ticks |
 | `probe` | `id`, `symbol`, `tf`, `indicator`, `buffer`, `count` | Diagnóstico: últimos valores de um buffer do indicador (nome curto começando com `indicator`) no gráfico do MT5 desse símbolo/timeframe |
 | `objects` | `id`, `symbol`, `tf`, `prefix` | Diagnóstico: texto e preço dos objetos do gráfico cujo nome começa com `prefix` |
 
@@ -35,6 +36,7 @@ horários são do servidor do MT5 (barras em segundos, ticks em milissegundos).
 | `positions` | `positions: [{ticket, symbol, side, volume, price, sl, tp, profit}, ..]` (todas as posições da conta) |
 | `orders` | `orders: [{ticket, symbol, side, kind, volume, price, sl, tp}, ..]` (todas as pendentes) |
 | `trade_result` | `id`, `ok`, `retcode` (MT5), `msg`, `ticket`, `price` |
+| `delta` | `symbol`, `tf`, `bars: [[time, buy, sell(, poc)], ..]` (candles sem ticks ficam de fora) |
 | `probe` | `id`, `indicator`, `buffer`, `times: [..]`, `values: [..]` (`null` = vazio) |
 | `objects` | `id`, `items: [{name, text, price}, ..]` |
 | `error` | `msg` |

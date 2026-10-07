@@ -3,7 +3,7 @@
 //! soon as it is saved. Changes made in the UI are written back in place, comments kept.
 //! A missing file means the defaults (`DEFAULT_TOML`, also what `mt5-terminal config init` writes).
 
-use crate::chart::Layer;
+use crate::chart::{CursorMode, Layer};
 use crate::model::Timeframe;
 use crate::theme::Palette;
 use eframe::egui::Color32;
@@ -29,6 +29,18 @@ layers = ["levels", "indicators", "trades", "price"]
 show_studies = true
 # Candles do primeiro bloco do gráfico (100 a 20000). Mais antigos vêm conforme você volta no tempo.
 first_bars = 1000
+# Cursor: "arrow" (seta), "hand" (mão para arrastar), "cross" (cruz para medir % e barras).
+cursor = "hand"
+
+[fibonacci]
+# Níveis no mapa de convergências, no M5, M15, H1 e D1.
+enabled = true
+# Último movimento entre pivôs confirmados, procurando nestes candles fechados de cada timeframe.
+lookback = 300
+# Candles fechados de cada lado que confirmam um topo/fundo. O candle em formação não participa.
+pivot_bars = 2
+# Retração a partir do fim do movimento: 0 = fim, 1 = início; 0.5 = 50%.
+levels = [0.236, 0.382, 0.5, 0.618, 0.786]
 
 [mt5]
 # Abrir o MetaTrader 5 ao iniciar, se ele não estiver aberto.
@@ -36,6 +48,12 @@ auto_start = true
 # Comando que abre o MT5. Vazio = como o atalho do MT5 (Wine do sistema, prefixo ~/.mt5).
 # Exemplo: ["env", "WINEPREFIX=/home/voce/.mt5", "wine", "C:\\Program Files\\MetaTrader 5\\terminal64.exe"]
 command = []
+
+[ui]
+# Boleta aberta à direita (false = recolhida numa faixa; « abre de novo).
+ticket_open = true
+# Painel do preset sob o gráfico (false = minimizado numa faixa).
+pane_open = true
 
 [ticket]
 # Operação predefinida ativa na boleta (nome de uma das [[presets]] abaixo); vazio = Manual.
@@ -100,6 +118,15 @@ pub struct Chart {
     pub layers: Vec<Layer>,
     pub show_studies: bool,
     pub first_bars: u32,
+    pub cursor: CursorMode,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Fibonacci {
+    pub enabled: bool,
+    pub lookback: usize,
+    pub pivot_bars: usize,
+    pub levels: Vec<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -224,6 +251,12 @@ fn percent() -> String {
     "percent".into()
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Ui {
+    pub ticket_open: bool,
+    pub pane_open: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct Ticket {
     /// Active preset by name; empty = manual.
@@ -234,8 +267,10 @@ pub struct Ticket {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Settings {
     pub chart: Chart,
+    pub fibonacci: Fibonacci,
     pub mt5: Mt5,
     pub colors: Colors,
+    pub ui: Ui,
     #[serde(default)]
     pub accounts: Vec<Account>,
     #[serde(default)]
@@ -292,7 +327,9 @@ fn unknown_keys(user: &toml::Table, defaults: &toml::Table, prefix: &str, out: &
         let name = format!("{prefix}{k}");
         match (v, defaults.get(k)) {
             (_, None) => out.push(name),
-            (toml::Value::Table(u), Some(toml::Value::Table(d))) => unknown_keys(u, d, &format!("{name}."), out),
+            (toml::Value::Table(u), Some(toml::Value::Table(d))) => {
+                unknown_keys(u, d, &format!("{name}."), out)
+            }
             _ => {}
         }
     }
@@ -327,6 +364,31 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
     if !(100..=20_000).contains(&s.chart.first_bars) {
         warnings.push(format!("chart.first_bars = {} fora de 100..20000; usando 1000", s.chart.first_bars));
         s.chart.first_bars = 1000;
+    }
+    if !(20..=2000).contains(&s.fibonacci.lookback) {
+        return Err("fibonacci.lookback: use 20..2000 candles fechados".into());
+    }
+    if !(1..=10).contains(&s.fibonacci.pivot_bars)
+        || 2 * s.fibonacci.pivot_bars + 3 > s.fibonacci.lookback
+    {
+        return Err("fibonacci.pivot_bars: use 1..10 e lookback >= 2 * pivot_bars + 3".into());
+    }
+    if s.fibonacci.levels.is_empty()
+        || s.fibonacci.levels.len() > 12
+        || s.fibonacci
+            .levels
+            .iter()
+            .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+    {
+        return Err("fibonacci.levels: de 1 a 12 proporções finitas entre 0 e 1".into());
+    }
+    for (i, v) in s.fibonacci.levels.iter().enumerate() {
+        if s.fibonacci.levels[..i]
+            .iter()
+            .any(|other| (other - v).abs() < 1e-9)
+        {
+            return Err("fibonacci.levels: cada proporção deve aparecer uma vez".into());
+        }
     }
     if s.chart.symbols.is_empty() {
         warnings.push("chart.symbols vazio; usando o padrão".into());
@@ -428,7 +490,11 @@ pub fn remember_account(login: i64, server: &str, kind: &str) -> std::io::Result
     let known = doc
         .get("accounts")
         .and_then(|a| a.as_array_of_tables())
-        .is_some_and(|t| t.iter().any(|a| a.get("login").and_then(|v| v.as_integer()) == Some(login) && a.get("server").and_then(|v| v.as_str()) == Some(server)));
+        .is_some_and(|t| {
+            t.iter().any(|a| {
+                a.get("login").and_then(|v| v.as_integer()) == Some(login) && a.get("server").and_then(|v| v.as_str()) == Some(server)
+            })
+        });
     if known {
         return Ok(false);
     }
@@ -481,6 +547,19 @@ pub fn save_presets(presets: &[Preset], active: &str) -> std::io::Result<()> {
     std::fs::write(p, doc.to_string())
 }
 
+/// Write `[ui]` in place (comments kept).
+pub fn save_ui_state(ui: &Ui) -> std::io::Result<()> {
+    let p = Settings::init()?;
+    let text = std::fs::read_to_string(&p)?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(std::io::Error::other)?;
+    if !doc.contains_table("ui") {
+        doc["ui"] = toml_edit::table();
+    }
+    doc["ui"]["ticket_open"] = toml_edit::value(ui.ticket_open);
+    doc["ui"]["pane_open"] = toml_edit::value(ui.pane_open);
+    std::fs::write(p, doc.to_string())
+}
+
 /// Write `[colors]` in place (comments kept).
 pub fn save_colors(colors: &Colors) -> std::io::Result<()> {
     let p = Settings::init()?;
@@ -511,9 +590,41 @@ pub fn save_chart(layers: &[Layer], show_studies: bool) -> std::io::Result<()> {
     })
 }
 
+pub fn save_cursor(cursor: CursorMode) -> std::io::Result<()> {
+    edit_chart(|chart| chart["cursor"] = toml_edit::value(cursor.key()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fibonacci_defaults_work_with_old_configs_and_validate_inputs() {
+        let (s, warnings) = parse("[chart]\ncursor = 'arrow'").unwrap();
+        assert!(warnings.is_empty());
+        assert!(s.fibonacci.enabled);
+        assert_eq!(s.fibonacci.lookback, 300);
+        assert_eq!(s.fibonacci.pivot_bars, 2);
+        assert_eq!(s.fibonacci.levels, [0.236, 0.382, 0.5, 0.618, 0.786]);
+        for value in [
+            "lookback = 2",
+            "pivot_bars = 0",
+            "pivot_bars = 11",
+            "levels = []",
+            "levels = [0.5, 0.5]",
+            "levels = [1.1]",
+            "levels = [nan]",
+        ] {
+            assert!(parse(&format!("[fibonacci]\n{value}")).is_err(), "{value}");
+        }
+        assert!(
+            !parse("[fibonacci]\nenabled = false")
+                .unwrap()
+                .0
+                .fibonacci
+                .enabled
+        );
+    }
 
     #[test]
     fn defaults_parse_and_match() {
@@ -522,6 +633,18 @@ mod tests {
         assert_eq!(s, Settings::default());
         assert_eq!(*s.chart.layers.last().unwrap(), Layer::Price);
         assert_eq!(s.palette().up, Color32::from_rgb(0x26, 0xa6, 0x9a));
+        assert_eq!(s.chart.cursor, CursorMode::Hand);
+    }
+
+    #[test]
+    fn cursor_config_accepts_modes_and_old_files_keep_default() {
+        for cursor in CursorMode::ALL {
+            let (s, w) = parse(&format!("[chart]\ncursor = \"{}\"\n", cursor.key())).unwrap();
+            assert_eq!(s.chart.cursor, cursor);
+            assert!(w.is_empty());
+        }
+        assert_eq!(parse("[chart]\nsymbol = \"X\"\n").unwrap().0.chart.cursor, CursorMode::Hand);
+        assert!(parse("[chart]\ncursor = \"bad\"\n").is_err());
     }
 
     #[test]
