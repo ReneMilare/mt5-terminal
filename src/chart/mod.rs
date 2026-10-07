@@ -1269,7 +1269,7 @@ fn draw_measurement(painter: &egui::Painter, f: &Frame, m: Measurement, digits: 
     }
     let percent = m.percent().map(|p| format!("{p:+.2}%")).unwrap_or_else(|| "—".into());
     let bars = m.bars();
-    let text = format!("{percent} · {bars} {}\n{:.d$} → {:.d$}",
+    let text = format!("{percent} · {bars} {}\n{:.d$} até {:.d$}",
         if bars == 1 { "barra" } else { "barras" }, m.start.price, m.end.price, d = digits as usize);
     let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), pal.text);
     let size = galley.size() + Vec2::new(16.0, 12.0);

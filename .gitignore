@@ -5,6 +5,7 @@
 *.ex5
 verify*.txt
 *.png
+!docs/img/*.png
 settings.json
 .env
 .env.*
