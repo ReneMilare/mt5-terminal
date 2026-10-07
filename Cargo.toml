@@ -3,7 +3,7 @@ name = "mt5-terminal"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Terminal de gráficos e ordens em Rust usando o MetaTrader 5 como ponte com a corretora"
+description = "Fast native charting and order terminal in Rust, with MetaTrader 5 as the broker bridge"
 
 [dependencies]
 chrono = "0.4.45"

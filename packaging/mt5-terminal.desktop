@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MT5 Terminal
+Comment=Charts and orders with MetaTrader 5 as the broker bridge
+Exec=mt5-terminal
+Icon=utilities-terminal
+Terminal=false
+StartupWMClass=mt5-terminal
+Categories=Office;Finance;

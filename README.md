@@ -1,128 +1,153 @@
 # MT5 Terminal
 
-**Gráficos e ordens em Rust, rápidos como o mercado pede, com o MetaTrader 5 só como ponte com a corretora.**
+[![CI](https://github.com/ReneMilare/mt5-terminal/actions/workflows/ci.yml/badge.svg)](https://github.com/ReneMilare/mt5-terminal/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ReneMilare/mt5-terminal)](https://github.com/ReneMilare/mt5-terminal/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-O MT5 continua fazendo o que faz bem: falar com a corretora. Gráfico, boleta e operação pelo gráfico
-ficam num app nativo (egui + wgpu) que abre na hora, desenha só o que está na tela e nunca trava um
-quadro. Um Expert Advisor (`mql5/TerminalBridge.mq5`) liga os dois por TCP local e repassa cotações,
-histórico, posições e ordens.
+**A fast, native charting and order terminal in Rust, with MetaTrader 5 as nothing more than the bridge to your broker.**
 
-![Gráfico com posição, stop, alvo e ordem pendente; boleta à direita](docs/img/hero.png)
+MetaTrader 5 keeps doing what it does well: talking to the broker. Charts, the order ticket and
+chart trading live in a native app (egui + wgpu) that opens instantly, draws only what is on screen
+and never drops a frame. An Expert Advisor (`mql5/TerminalBridge.mq5`) connects the two over local
+TCP and relays quotes, history, positions and orders.
 
-## Destaques
+![Chart with a position, stop, target and a pending order; order ticket on the right](docs/img/hero.png)
 
-- **Rápido de verdade.** O primeiro bloco de histórico pinta em cerca de 1 s; o resto chega aos poucos,
-  conforme você volta no tempo ou dá zoom out. Indicadores incrementais: um tick custa nanossegundos.
-- **Operação pelo gráfico, como no ProfitChart.** Shift compra, Ctrl vende, o clique posiciona; stop,
-  alvo e ordens se arrastam; o × de cada linha fecha, cancela ou remove.
-- **Operações predefinidas.** Volume, stop e alvo (em % da entrada ou em pontos) prontos num clique,
-  já desenhados na ordem que segue o ponteiro.
-- **Boleta completa.** Mercado, limite e stop, ZERAR, INVERTER (netting e hedge), BE e atalhos de teclado.
-- **Seguro por padrão.** Conta REAL travada até você armar a boleta; a senha fica só no MT5; fonte
-  **Sintético** com corretora simulada para testar sem risco.
-- **Configurável por você ou por um agente.** Tudo num `config.toml` comentado, aplicado na hora, e um
-  comando `ctl` que nunca envia ordens.
+> The UI is in Brazilian Portuguese (*Comprar* = buy, *Vender* = sell, *Boleta* = order ticket).
 
-## Operação pelo gráfico
+## Highlights
 
-![Shift segurado: a ordem limite segue o ponteiro com stop e alvo da operação predefinida](docs/img/ghost.png)
+- **Actually fast.** The first chunk of history paints in about a second; older bars stream in as you
+  scroll back or zoom out. Indicators are incremental: a tick costs nanoseconds.
+- **Chart trading, ProfitChart style.** Hold Shift to buy or Ctrl to sell and click to place; drag
+  stops, targets and orders; the × on any line closes, cancels or removes it.
+- **Order presets.** Volume, stop and target (as % of entry or in points) in one click, already drawn
+  on the order that follows your pointer.
+- **A full order ticket.** Market, limit and stop orders, flatten, reverse (netting and hedging),
+  breakeven, and keyboard shortcuts.
+- **Safe by default.** Real accounts stay locked until you arm the ticket; your password stays in MT5;
+  a **Synthetic** source with a simulated broker lets you try everything risk-free.
+- **Configurable by you or by an AI agent.** Everything lives in a commented `config.toml`, applied
+  live, plus a `ctl` command that never sends orders.
 
-- Segure **Shift** (compra) ou **Ctrl** (venda): a ordem acompanha o ponteiro, já com o volume, o stop
-  e o alvo da operação predefinida, e o clique a posiciona (limite do lado favorável, stop do outro).
-- Com **Alt** segurado, arraste a linha da posição para o lado do ganho (alvo) ou da perda (stop), ou
-  mova ordens, stops e alvos já posicionados.
-- O **×** de cada linha (ou Delete com o mouse sobre ela) fecha a posição com seu stop e alvo, cancela
-  a ordem ou tira só o stop/alvo. O botão direito abre um menu de ordens.
-- Atalhos: **Ctrl+Shift+B/S** compra/venda, **Z** zera, **R** inverte, **E** breakeven, mesmo com a
-  boleta recolhida.
+## Chart trading
 
-Tudo passa pelas mesmas travas da boleta.
+![Shift held: a limit order follows the pointer with the preset's stop and target](docs/img/ghost.png)
 
-## Gráfico
+- Hold **Shift** (buy) or **Ctrl** (sell): the order follows the pointer with the preset's volume,
+  stop and target, and a click places it (limit on the favorable side, stop on the other).
+- With **Alt** held, drag a position line toward profit (target) or loss (stop), or move orders,
+  stops and targets already placed.
+- The **×** on each line (or Delete while hovering it) closes the position along with its stop and
+  target, cancels the order, or removes just the stop/target. Right-click opens an order menu.
+- Shortcuts: **Ctrl+Shift+B/S** buy/sell, **Z** flatten, **R** reverse, **E** breakeven, even with
+  the ticket collapsed.
 
-![Modo Cruz medindo +1,02% em 36 barras](docs/img/measure.png)
+Every action goes through the same safety locks as the ticket.
 
-- Bid e ask com linhas e etiquetas no eixo, spread na legenda, contagem regressiva do candle.
-- Três modos de cursor: **Seta**, **Mão** (arrastar o gráfico) e **Cruz** (clique e arraste para medir
-  a variação em % e a distância em barras; Esc limpa).
-- Teclado: ←/→ movem, +/− dão zoom.
-- O preço fica na frente de tudo por padrão; a ordem das camadas (níveis, indicadores, posições, preço)
-  muda no menu **Camadas**.
-- Mais espaço quando precisar: a boleta recolhe numa faixa (»/«) e o painel de indicadores minimiza.
-- Troca entre conta demo e real pela barra de status: o app reabre o MT5 na conta escolhida e pede
-  confirmação antes da REAL.
+## Charting
 
-## Cores
+![Crosshair mode measuring +1.02% over 36 bars](docs/img/measure.png)
 
-![Janela Cores com predefinições e cores de candle](docs/img/colors.png)
+- Bid and ask lines with axis labels, spread in the legend, bar countdown.
+- Three cursor modes: **Arrow**, **Hand** (drag the chart) and **Crosshair** (click and drag to
+  measure the % change and the distance in bars; Esc clears).
+- Keyboard: ←/→ pan, +/− zoom.
+- Price is drawn on top of everything by default; the layer order (levels, indicators, positions,
+  price) is set in the **Camadas** (Layers) menu.
+- More room when you need it: the ticket collapses to a thin strip (»/«) and the indicator pane
+  minimizes.
+- Switch between demo and real accounts from the status bar: the app restarts MT5 on the chosen
+  account and asks for confirmation before going real.
 
-Como a aba de cores do MT5: fundo, painéis, grade, texto, destaque, alta/baixa e candles (corpo e
-contorno separados; corpo da cor do fundo = candle vazado). Predefinições prontas (Padrão escuro,
-MetaTrader clássico, Claro, TradingView), aplicadas na hora.
+## Colors
 
-## Desempenho
+![Colors window with presets and candle colors](docs/img/colors.png)
 
-Medido num notebook (Hyprland, 1920×1080), 20 mil candles e 20 ticks por segundo:
+Like MT5's color tab: background, panels, grid, text, accent, up/down and candles (body and outline
+set separately; a body matching the background gives hollow candles). Built-in presets (dark
+default, classic MetaTrader, light, TradingView), applied instantly.
+
+## Performance
+
+Measured on a laptop (Hyprland, 1920×1080) with 20,000 bars and 20 ticks per second:
 
 | | |
 |---|---|
-| Quadro (interface) | ~0,8 ms em média, p99 < 2 ms (orçamento de 60 Hz: 16,7 ms) |
-| Parado | ~4% de CPU, ~80 MB de memória |
-| Tick sem candle novo | ~180 ns nos indicadores |
-| Candle novo | ~0,25 ms |
-| Carga completa de 20 mil candles | ~60 ms, fora da thread da interface |
+| Frame (UI) | ~0.8 ms average, p99 < 2 ms (60 Hz budget: 16.7 ms) |
+| Idle | ~4% CPU, ~80 MB RAM |
+| Tick without a new bar | ~180 ns in the indicators |
+| New bar | ~0.25 ms |
+| Full load of 20,000 bars | ~60 ms, off the UI thread |
 
-Para conferir no seu ambiente: `cargo test --release -- --ignored --nocapture bench`, ou rode o app
-com `MT5_TERMINAL_PERF=1` para ver quadros/s, ticks/s e o tempo de cada quadro a cada 5 s.
+Check it on your machine with `cargo test --release -- --ignored --nocapture bench`, or run the app
+with `MT5_TERMINAL_PERF=1` to print frames/s, ticks/s and frame times every 5 s.
 
-## Instalação
+## Installation
 
-Requer Rust (edition 2024) e o MetaTrader 5 (no Linux, via Wine).
+### Download
+
+Grab the latest Linux build from [Releases](https://github.com/ReneMilare/mt5-terminal/releases):
+
+```sh
+tar -xzf mt5-terminal-*-linux-x86_64.tar.gz
+cd mt5-terminal-*-linux-x86_64
+./mt5-terminal --synthetic   # try it without MT5: simulated data and broker
+./mt5-terminal               # with MetaTrader 5 (starts it if it isn't running)
+```
+
+The archive also has a `.desktop` launcher and the EA source (`mql5/TerminalBridge.mq5`).
+
+### Build from source
+
+Requires Rust (edition 2024).
 
 ```sh
 cargo build --release
-target/release/mt5-terminal              # abre o MT5 se ele não estiver aberto
-target/release/mt5-terminal --synthetic  # sem MT5: dados e corretora simulados
+target/release/mt5-terminal --synthetic
 ```
 
-No MT5:
+### Connect MetaTrader 5
 
-1. Compile e instale o EA: `tools/build-ea.sh` (ou abra `mql5/TerminalBridge.mq5` no MetaEditor).
-2. **Ferramentas → Opções → Expert Advisors**: permita WebRequest para `127.0.0.1`.
-3. Anexe `MT5Terminal/TerminalBridge` a um gráfico e ligue o **Algo Trading**.
+MetaTrader 5 runs on Linux through Wine.
 
-Uma instância só: abrir de novo traz a janela existente para a frente. Protocolo e detalhes em
-[docs/protocol.md](docs/protocol.md).
+1. Compile and install the EA: `tools/build-ea.sh`, or open `mql5/TerminalBridge.mq5` in MetaEditor
+   and compile it.
+2. **Tools → Options → Expert Advisors**: allow WebRequest for `127.0.0.1`.
+3. Attach `MT5Terminal/TerminalBridge` to any chart and turn on **Algo Trading**.
 
-## Configuração
+Only one instance runs at a time: launching it again brings the existing window to the front. Wire
+protocol and details: [docs/protocol.md](docs/protocol.md).
 
-`~/.config/mt5-terminal/config.toml`, comentado e aplicado na hora ao salvar (`mt5-terminal config
-init` cria, `config check` valida). Com o app aberto, `mt5-terminal ctl help` lista comandos como
-`ctl symbol UsaInd`, `ctl tf H1`, `ctl front price` e `ctl state`. Agentes (Claude Code) têm uma skill
-em `.claude/skills/configure-mt5-terminal`. Nada disso envia ordens.
+## Configuration
 
-## Indicadores
+`~/.config/mt5-terminal/config.toml`, commented and applied live on save (`mt5-terminal config init`
+creates it, `config check` validates it). While the app is open, `mt5-terminal ctl help` lists
+commands such as `ctl symbol UsaInd`, `ctl tf H1`, `ctl front price` and `ctl state`. AI agents
+(Claude Code) get a skill in `.claude/skills/configure-mt5-terminal`. None of this sends orders.
 
-O app não traz indicadores próprios: um preset opcional em `preset/` (outro repositório) é compilado
-quando a pasta existe, pela interface de [src/studies.rs](src/studies.rs). Sem ele, o app roda com o
-gráfico limpo, como nas imagens acima. O preset pode substituir o volume do rodapé (ex.: delta de
-volume), marcar um preço por candle (ex.: POC) e ter um painel sob o gráfico.
+## Indicators
 
-O preset inclui Fibonacci automático no **M5, M15, H1 e D1**, integrado às convergências do mapa de
-suportes e resistências. Usa o último movimento entre topo e fundo confirmados por 2 candles fechados
-de cada lado, dentro dos últimos 300 candles fechados de cada série. Retrações padrão: **23,6%, 38,2%,
-50%, 61,8% e 78,6%**. Cada etiqueta identifica timeframe e percentual, alinhada à extrema esquerda do
-gráfico; ao passar o mouse, aparecem todas as referências com seus preços. Vários percentuais do mesmo
-Fibonacci contam como uma referência na convergência; timeframes diferentes contam separadamente. O
-mapa mantém até três níveis de cada lado do preço, priorizando convergências. Sem um par de pivôs
-confirmado, aquela série aguarda confirmação. Ajustes em `[fibonacci]` no config.toml: `enabled`,
-`lookback` (20–2000), `pivot_bars` (1–10) e `levels` (frações de 0 a 1).
+The app ships no indicators of its own: an optional preset in `preset/` (a separate repository) is
+compiled in when the folder exists, through the interface in [src/studies.rs](src/studies.rs).
+Without it the app runs with a clean chart, as in the screenshots above. A preset can replace the
+volume band (e.g. volume delta), mark a price per bar (e.g. POC) and add a pane under the chart.
 
-## Segurança
+The author's preset includes automatic Fibonacci on **M5, M15, H1 and D1**, feeding the confluences
+of its support/resistance map. It uses the last swing between a high and a low confirmed by 2 closed
+bars on each side, within the last 300 closed bars of each series. Default retracements: **23.6%,
+38.2%, 50%, 61.8% and 78.6%**. Each label shows timeframe and percentage, aligned to the far left of
+the chart; hovering shows every reference with its price. Several levels of the same Fibonacci count
+as one reference in a confluence; different timeframes count separately. The map keeps up to three
+levels on each side of the price, favoring confluences. Without a confirmed pivot pair, that series
+waits. Settings under `[fibonacci]` in config.toml: `enabled`, `lookback` (20–2000), `pivot_bars`
+(1–10) and `levels` (fractions from 0 to 1).
 
-A ponte escuta só em `127.0.0.1`. O app não guarda credenciais: o login na corretora é feito no MT5.
-Use uma conta demo ou a fonte Sintético para testar ordens.
+## Security
 
-## Licença
+The bridge listens on `127.0.0.1` only. The app stores no credentials: you log in to the broker in
+MT5. Use a demo account or the Synthetic source to test orders.
+
+## License
 
 [MIT](LICENSE)

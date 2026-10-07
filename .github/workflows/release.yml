@@ -1,0 +1,36 @@
+name: Release
+
+# Push a tag like v0.2.0 to publish a release with the Linux binary.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # older glibc: the binary runs on most current distributions
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          name=mt5-terminal-${GITHUB_REF_NAME}-linux-x86_64
+          mkdir -p "$name/mql5"
+          cp target/release/mt5-terminal README.md LICENSE packaging/mt5-terminal.desktop "$name/"
+          cp mql5/TerminalBridge.mq5 "$name/mql5/"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" mt5-terminal-*.tar.gz* \
+            --title "MT5 Terminal $GITHUB_REF_NAME" --generate-notes
