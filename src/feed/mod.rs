@@ -182,6 +182,8 @@ pub enum Message {
         /// Terminal, account and EA all allow trading ("Algo Trading" on).
         trade_allowed: bool,
     },
+    /// Account-wide daily result, using the broker's server day. None means history is loading.
+    DailyResult { day_start: i64, realized: Option<f64>, floating: f64, currency: String },
     /// Every open position of the account (all symbols), sent when anything in it changes.
     Positions {
         positions: Vec<Position>,
@@ -227,9 +229,9 @@ pub enum Message {
     },
 }
 
-/// Protocol version this app speaks; older EAs lack the POC per bar (v6), the delta (v5), modify + netting flag (v4), paged history (v3),
+/// Protocol version this app speaks; older EAs lack the daily result (v7), POC per bar (v6), the delta (v5), modify + netting flag (v4), paged history (v3),
 /// the history queue and probes (v2).
-pub const BRIDGE_VERSION: u32 = 6;
+pub const BRIDGE_VERSION: u32 = 7;
 
 fn is_zero(v: &f64) -> bool {
     *v == 0.0
@@ -268,6 +270,16 @@ impl Feed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daily_result_wire_accepts_history_pending() {
+        for realized in ["-6.36", "null"] {
+            let json = format!(r#"{{"t":"daily_result","day_start":1791331200,"realized":{realized},"floating":1.5,"currency":"USD"}}"#);
+            let msg: Message = serde_json::from_str(&json).unwrap();
+            assert!(matches!(msg, Message::DailyResult { day_start: 1791331200, floating: 1.5, .. }));
+            assert_eq!(serde_json::from_str::<Message>(&serde_json::to_string(&msg).unwrap()).unwrap(), msg);
+        }
+    }
 
     #[test]
     fn wire_format() {

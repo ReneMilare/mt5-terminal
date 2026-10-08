@@ -110,6 +110,8 @@ impl Walk {
 struct Paper {
     next_ticket: u64,
     balance: f64,
+    day_start: i64,
+    day_balance: f64,
     positions: Vec<Position>,
     orders: Vec<PendingOrder>,
 }
@@ -127,7 +129,15 @@ fn floating(p: &Position, bid: f64, ask: f64) -> f64 {
 
 impl Paper {
     fn new() -> Self {
-        Self { next_ticket: 1000, balance: 10_000.0, positions: Vec::new(), orders: Vec::new() }
+        Self { next_ticket: 1000, balance: 10_000.0, day_start: now_secs().div_euclid(86400) * 86400, day_balance: 10_000.0, positions: Vec::new(), orders: Vec::new() }
+    }
+
+    fn roll_day(&mut self, now: i64) {
+        let day = now.div_euclid(86400) * 86400;
+        if day != self.day_start {
+            self.day_start = day;
+            self.day_balance = self.balance;
+        }
     }
 
     fn ticket(&mut self) -> u64 {
@@ -181,6 +191,7 @@ impl Paper {
     }
 
     fn close(&mut self, id: u64, ticket: u64, quote: impl Fn(&str) -> (f64, f64)) -> Message {
+        self.roll_day(now_secs());
         let Some(i) = self.positions.iter().position(|p| p.ticket == ticket) else {
             return result(id, false, 10036, "posição não encontrada", ticket, 0.0);
         };
@@ -254,6 +265,7 @@ impl Paper {
 
     /// Trigger pending orders, SL and TP of `symbol` and refresh the floating results.
     fn on_quote(&mut self, symbol: &str, bid: f64, ask: f64) {
+        self.roll_day(now_secs());
         let mut filled = Vec::new();
         self.orders.retain(|o| {
             let hit = o.symbol == symbol
@@ -290,7 +302,8 @@ impl Paper {
         self.balance += realized;
     }
 
-    fn state(&self) -> [Message; 3] {
+    fn state(&mut self) -> [Message; 4] {
+        self.roll_day(now_secs());
         let floating: f64 = self.positions.iter().map(|p| p.profit).sum();
         [
             Message::Positions { positions: self.positions.clone() },
@@ -302,6 +315,7 @@ impl Paper {
                 currency: "USD".into(),
                 trade_allowed: true,
             },
+            Message::DailyResult { day_start: self.day_start, realized: Some(self.balance - self.day_balance), floating, currency: "USD".into() },
         ]
     }
 }
@@ -450,6 +464,23 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Feed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paper_daily_result_separates_closed_and_open_and_resets_at_midnight() {
+        let mut p = Paper::new();
+        p.order(1, "X", Side::Buy, OrderKind::Market, 1.0, 0.0, 0.0, 0.0, (100.0, 100.5));
+        p.on_quote("X", 102.0, 102.5);
+        assert!(matches!(p.state()[3], Message::DailyResult { realized: Some(0.0), floating: 1.5, .. }));
+        p.close(2, p.positions[0].ticket, |_| (102.0, 102.5));
+        assert!(matches!(p.state()[3], Message::DailyResult { realized: Some(1.5), floating: 0.0, .. }));
+        p.day_start -= 86400;
+        p.order(3, "X", Side::Sell, OrderKind::Market, 1.0, 0.0, 0.0, 0.0, (102.0, 102.5));
+        p.on_quote("X", 99.5, 100.0);
+        assert!(matches!(p.state()[3], Message::DailyResult { realized: Some(0.0), floating: 2.0, .. }));
+        p.close(4, p.positions[0].ticket, |_| (99.5, 100.0));
+        assert!(matches!(p.state()[3], Message::DailyResult { realized: Some(2.0), floating: 0.0, .. }));
+        assert_eq!(p.balance, 10003.5);
+    }
 
     #[test]
     fn aggregates_history() {

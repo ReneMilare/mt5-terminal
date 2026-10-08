@@ -27,6 +27,7 @@ salvar. Para ações imediatas existe `mt5-terminal ctl`, como o `hyprctl` do Hy
 | `fibonacci.enabled` | Fibonacci M5/M15/H1/D1 no mapa do preset |
 | `fibonacci.lookback`, `fibonacci.pivot_bars` | 20–2000 candles fechados de busca; 1–10 candles fechados de cada lado para confirmar pivôs (padrão 300 / 2) |
 | `fibonacci.levels` | 1–12 frações únicas entre 0 e 1; padrão `[0.236, 0.382, 0.5, 0.618, 0.786]` |
+| `[studies.<indicador>]` | opções de cada indicador do preset (só as alteradas). Os indicadores, as opções e os valores atuais estão em `ctl state` → `indicators`; cores `"#rrggbb"`, timeframes como lista `["M5", "H1"]`, escolhas pela chave. Apagar a tabela volta ao padrão. O usuário também edita pelo gráfico: botão direito sobre o indicador → Editar |
 | `mt5.auto_start` | abrir o MetaTrader 5 junto se ele estiver fechado |
 | `mt5.command` | comando que abre o MT5 (lista); vazio = como o atalho do MT5 |
 | `colors.background/panel/grid/text/accent` | `"#rrggbb"`: fundo do gráfico, painéis, grade, texto, destaque |

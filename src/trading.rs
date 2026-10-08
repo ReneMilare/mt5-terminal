@@ -75,10 +75,25 @@ pub struct Funds {
     pub trade_allowed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct DayResult {
+    pub day_start: i64,
+    pub realized: Option<f64>,
+    pub floating: f64,
+    pub currency: String,
+}
+
+impl DayResult {
+    pub fn total(&self) -> Option<f64> {
+        self.realized.map(|v| v + self.floating)
+    }
+}
+
 pub struct Trading {
     pub positions: Vec<Position>,
     pub orders: Vec<PendingOrder>,
     pub funds: Option<Funds>,
+    pub day_result: Option<DayResult>,
     pub spec: Option<Spec>,
     /// Bid/ask of the chart symbol.
     pub quote: Option<(f64, f64)>,
@@ -109,6 +124,7 @@ impl Default for Trading {
             positions: Vec::new(),
             orders: Vec::new(),
             funds: None,
+            day_result: None,
             spec: None,
             quote: None,
             volume: 0.0,
@@ -167,6 +183,7 @@ impl Trading {
         self.positions.clear();
         self.orders.clear();
         self.funds = None;
+        self.day_result = None;
         self.spec = None;
         self.quote = None;
         self.requests.clear();
@@ -199,6 +216,9 @@ impl Trading {
                 });
             }
             Message::Positions { positions } => self.positions = positions.clone(),
+            Message::DailyResult { day_start, realized, floating, currency } => {
+                self.day_result = Some(DayResult { day_start: *day_start, realized: *realized, floating: *floating, currency: currency.clone() });
+            }
             Message::Orders { orders } => self.orders = orders.clone(),
             Message::TradeResult { id, ok, retcode, msg, price, .. } => {
                 let what = self.requests.get(id).cloned().unwrap_or_else(|| format!("#{id}"));
@@ -304,7 +324,7 @@ impl Trading {
         let tick = self.spec.as_ref()?.tick_size;
         match action {
             ChartAction::Order { side, kind, price } => self.order_at(symbol, side, kind, price),
-            ChartAction::TogglePane => None,
+            ChartAction::TogglePane | ChartAction::EditStudy(_) => None,
             ChartAction::Remove { handle } => match handle {
                 Handle::Order(ticket) => {
                     self.orders.iter().any(|o| o.ticket == ticket).then_some(())?;
@@ -540,6 +560,24 @@ impl Trading {
             ui.separator();
         }
 
+        ui.label(RichText::new("Resultado do dia · conta").color(pal.text_dim).size(12.0))
+            .on_hover_text("Conta inteira, em moeda da conta. Realizado de hoje com comissões, swap e taxas + resultado atual de todas as posições abertas (inclusive de dias anteriores). Depósitos e saques não entram. Dia do servidor da corretora; UTC no Sintético.");
+        let total = self.day_result.as_ref().and_then(DayResult::total);
+        ui.label(RichText::new(self.day_total_text()).strong().size(18.0).color(pnl_color(total, pal)));
+        if let Some(day) = &self.day_result {
+            egui::Grid::new("day_result").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
+                for (name, value) in [("Realizado", day.realized), ("Aberto", Some(day.floating))] {
+                    ui.label(RichText::new(name).color(pal.text_dim).size(12.0));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let text = value.map(|v| format!("{v:+.2} {}", day.currency)).unwrap_or_else(|| "carregando…".into());
+                        ui.label(RichText::new(text).color(pnl_color(value, pal)).size(12.5));
+                    });
+                    ui.end_row();
+                }
+            });
+        }
+        ui.separator();
+
         if real {
             let text = if self.armed { "REAL armada: ordens liberadas" } else { "Armar conta REAL" };
             ui.checkbox(&mut self.armed, RichText::new(text).color(pal.danger).strong());
@@ -685,6 +723,17 @@ impl Trading {
         out
     }
 
+    /// Also shown in the status bar, so collapsing the ticket keeps the total visible.
+    pub fn day_total_text(&self) -> String {
+        match &self.day_result {
+            Some(day) => match day.total() {
+                Some(v) => format!("Dia: {v:+.2} {}", day.currency),
+                None => "Dia: carregando…".into(),
+            },
+            None => "Dia: aguardando dados…".into(),
+        }
+    }
+
     /// Positions and pending orders of every symbol, with close/cancel buttons.
     pub fn book_ui(&mut self, ui: &mut egui::Ui, pal: &Palette, can_trade: bool) -> Vec<Command> {
         let mut out = Vec::new();
@@ -748,9 +797,33 @@ impl Trading {
     }
 }
 
+pub fn pnl_color(value: Option<f64>, pal: &Palette) -> Color32 {
+    match value {
+        Some(v) if v > 0.0 => pal.up,
+        Some(v) if v < 0.0 => pal.down,
+        _ => pal.text_dim,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daily_result_is_account_wide_and_cleared_on_disconnect() {
+        let mut t = Trading::default();
+        let msg = Message::DailyResult { day_start: 1791331200, realized: Some(-6.36), floating: 2.0, currency: "USD".into() };
+        assert!(t.on_message(&msg, "UsaTec"));
+        assert!((t.day_result.as_ref().unwrap().total().unwrap() + 4.36).abs() < 1e-9);
+        t.symbol_changed();
+        assert_eq!(t.day_total_text(), "Dia: -4.36 USD");
+        assert!(t.on_message(&Message::DailyResult { day_start: 1791417600, realized: None, floating: 3.0, currency: "BRL".into() }, "UsaInd"));
+        assert_eq!(t.day_result.as_ref().unwrap().total(), None);
+        assert_eq!(t.day_total_text(), "Dia: carregando…");
+        t.reset();
+        assert!(t.day_result.is_none());
+        assert_eq!(t.day_total_text(), "Dia: aguardando dados…");
+    }
 
     #[test]
     fn grid_rounding_has_no_float_noise() {

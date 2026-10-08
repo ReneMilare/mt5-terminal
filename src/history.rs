@@ -16,6 +16,8 @@ pub const WARM_CHUNK: u32 = 5000;
 pub enum Need {
     /// One more chunk, whatever is loaded (the view reached the oldest bar).
     More,
+    /// Cover an absolute server time, for navigation to a calendar date.
+    At { time: i64 },
     /// At least this many bars, including the forming bar, regardless of session gaps.
     #[cfg_attr(not(has_preset), allow(dead_code))] // Optional presets request exact bar counts.
     Bars { count: usize },
@@ -54,6 +56,7 @@ impl Loader {
         let bars = store.bars(symbol, tf);
         match need {
             Need::More => false,
+            Need::At { time } => bars.first().is_some_and(|b| b.time <= time),
             Need::Bars { count } => bars.len() >= count,
             Need::Since { span, cap } => match (bars.first(), bars.last()) {
                 (Some(first), Some(last)) => bars.len() >= cap || first.time <= last.time - span,
@@ -72,6 +75,8 @@ impl Loader {
         st.in_flight = Some(Some(first));
         let count = match need {
             Need::More => CHUNK,
+            Need::At { time } => ((first - time).div_euclid(tf.seconds()) + 1)
+                .clamp(1, WARM_CHUNK as i64) as u32,
             Need::Bars { count } => count
                 .saturating_sub(store.bars(symbol, tf).len())
                 .min(WARM_CHUNK as usize) as u32,

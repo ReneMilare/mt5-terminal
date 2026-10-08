@@ -30,6 +30,13 @@ por isso antes de qualquer outra coisa.
 - Marcas por candle sobre os candles (`Studies::marks`, ex.: POC): traço que acompanha a largura do
   candle (`chart::Marks`). A POC vem junto com o delta (`row` do preset no comando `delta`).
 
+- Indicadores editáveis pelo gráfico: botão direito sobre a linha, nível, marca, faixa de volume, fundo
+  ou painel de um indicador → "Editar …" (ou o submenu Indicadores); a janela aplica na hora e grava só o
+  que difere do padrão em `[studies.<indicador>]` (`studies::StudyParams`, opções declaradas pelo preset).
+  Cada elemento desenhado leva a chave do indicador (`study`) para o clique direito (`chart::study_at`).
+  O preset também pode pintar o fundo por candle (`Shading`), desenhar faixas finas na base do gráfico
+  (`Ribbon`, uma classe por candle em cada linha; o volume sobe para ficar em cima delas) e pôr uma linha
+  de estado sob a legenda.
 - O **preço fica na frente de tudo** por padrão (`Layer::DEFAULT`, de trás para a frente: níveis,
   indicadores, posições/ordens, preço). O usuário muda a ordem no menu **Camadas**; a escolha fica no
   `config.toml` (`chart.layers`). O volume fica sempre no fundo.
@@ -61,7 +68,7 @@ por isso antes de qualquer outra coisa.
 
 O app não traz indicadores: um preset privado em `preset/` (repositório próprio, ignorado por este)
 entra na compilação quando a pasta existe (`build.rs` → `cfg(has_preset)`) e implementa a interface de
-`src/studies.rs`. Sem a pasta, o app compila e roda sem indicadores; teste as duas formas. Detalhes do
+`src/studies.rs` (inclusive `params`/`configure`, as opções editáveis de cada indicador). Sem a pasta, o app compila e roda sem indicadores; teste as duas formas. Detalhes do
 preset ficam em `preset/CLAUDE.md`. `[fibonacci]` configura os pivôs/retrações do mapa do preset;
 `Studies::new` recebe as opções, `configure_fibonacci` aplica alterações e `fibonacci_state` expõe as
 âncoras e os níveis no `ctl state`.

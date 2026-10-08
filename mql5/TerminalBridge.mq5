@@ -6,7 +6,7 @@
 //| Veja docs/protocol.md.                                           |
 //+------------------------------------------------------------------+
 #property copyright "MT5 Terminal"
-#property version   "6.00"
+#property version   "7.00"
 #property description "Ponte do MT5 Terminal: cotações, histórico e ordens por TCP local."
 
 input string InpHost      = "127.0.0.1"; // Endereço do app
@@ -15,7 +15,7 @@ input ulong  InpMagic     = 47011;       // Número mágico das ordens do app
 input ulong  InpDeviation = 20;          // Desvio máximo a mercado (pontos)
 input int    InpTimerMs   = 10;          // Ciclo (ms): ticks, comandos e estado
 
-#define BRIDGE_VERSION 6 // sobe quando o protocolo muda; o app avisa se o EA for mais antigo
+#define BRIDGE_VERSION 7 // sobe quando o protocolo muda; o app avisa se o EA for mais antigo
 #define RECONNECT_MS 1000
 #define STATE_MS     100
 #define MAX_TICKS    2000
@@ -58,6 +58,12 @@ int      g_dTries = 0;
 string   g_lastPositions = "";
 string   g_lastOrders = "";
 string   g_lastAccount = "";
+string   g_lastDaily = "";
+datetime g_dayStart = 0;
+double   g_dayRealized = 0.0;
+bool     g_dayDirty = true;
+bool     g_dayReady = false;
+ulong    g_nextDayRetry = 0;
 
 //+------------------------------------------------------------------+
 //| JSON mínimo: só objetos planos que o app envia                   |
@@ -255,7 +261,50 @@ void SendResult(const long id, const bool ok, const uint retcode, const string m
         IntegerToString((long)ticket) + ",\"price\":" + DoubleToString(price, 8) + "}\n");
   }
 
-//--- posições, ordens e conta: só o que mudou
+//--- realizado da conta inteira; relê só na virada do dia ou quando muda um negócio
+void UpdateDailyResult()
+  {
+   datetime now = TimeTradeServer();
+   datetime last = TimeCurrent();
+   if(last > now)
+      now = last;
+   if(now <= 0)
+      return;
+   datetime day = now - now % 86400;
+   if(day != g_dayStart)
+     {
+      g_dayStart = day;
+      g_dayRealized = 0.0;
+      g_dayDirty = true;
+      g_dayReady = false;
+      g_nextDayRetry = 0;
+     }
+   if(!g_dayDirty || GetTickCount64() < g_nextDayRetry)
+      return;
+   g_nextDayRetry = GetTickCount64() + 1000;
+   if(!HistorySelect(g_dayStart, now))
+      return;
+   double realized = 0.0;
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+     {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0)
+         continue;
+      long type = HistoryDealGetInteger(ticket, DEAL_TYPE);
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL &&
+         type != DEAL_TYPE_COMMISSION && type != DEAL_TYPE_COMMISSION_DAILY &&
+         type != DEAL_TYPE_COMMISSION_MONTHLY && type != DEAL_TYPE_COMMISSION_AGENT_DAILY &&
+         type != DEAL_TYPE_COMMISSION_AGENT_MONTHLY)
+         continue;
+      realized += HistoryDealGetDouble(ticket, DEAL_PROFIT) + HistoryDealGetDouble(ticket, DEAL_COMMISSION) +
+                  HistoryDealGetDouble(ticket, DEAL_SWAP) + HistoryDealGetDouble(ticket, DEAL_FEE);
+     }
+   g_dayRealized = realized;
+   g_dayDirty = false;
+   g_dayReady = true;
+  }
+
+//--- posições, ordens, conta e resultado do dia: só o que mudou
 void SendState(const bool force)
   {
    string out = "";
@@ -329,6 +378,16 @@ void SendState(const bool force)
      {
       StringAdd(out, acc);
       g_lastAccount = acc;
+     }
+   UpdateDailyResult();
+   string daily = "{\"t\":\"daily_result\",\"day_start\":" + IntegerToString((long)g_dayStart) +
+                  ",\"realized\":" + (g_dayReady && !g_dayDirty ? Num(g_dayRealized, 2) : "null") +
+                  ",\"floating\":" + Num(AccountInfoDouble(ACCOUNT_PROFIT), 2) +
+                  ",\"currency\":\"" + Esc(AccountInfoString(ACCOUNT_CURRENCY)) + "\"}\n";
+   if(force || daily != g_lastDaily)
+     {
+      StringAdd(out, daily);
+      g_lastDaily = daily;
      }
    Send(out);
   }
@@ -981,6 +1040,13 @@ int OnInit()
   {
    if(InpTimerMs < 1 || !EventSetMillisecondTimer(InpTimerMs))
       return(INIT_PARAMETERS_INCORRECT);
+   // Reinitialização por troca de conta: nunca reutiliza o realizado da conta anterior.
+   g_dayStart = 0;
+   g_dayRealized = 0.0;
+   g_dayDirty = true;
+   g_dayReady = false;
+   g_nextDayRetry = 0;
+   g_lastDaily = "";
    g_nextConnect = 0;
    return(INIT_SUCCEEDED);
   }
@@ -1051,6 +1117,12 @@ void OnTick()
 
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
   {
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD || trans.type == TRADE_TRANSACTION_DEAL_UPDATE ||
+      trans.type == TRADE_TRANSACTION_DEAL_DELETE)
+     {
+      g_dayDirty = true;
+      g_nextDayRetry = 0;
+     }
    if(trans.type == TRADE_TRANSACTION_REQUEST)
      {
       for(int i = ArraySize(g_reqIds) - 1; i >= 0; i--)

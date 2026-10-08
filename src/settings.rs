@@ -42,6 +42,12 @@ pivot_bars = 2
 # Retração a partir do fim do movimento: 0 = fim, 1 = início; 0.5 = 50%.
 levels = [0.236, 0.382, 0.5, 0.618, 0.786]
 
+# Opções de cada indicador do preset (também pelo gráfico: botão direito sobre o indicador → Editar).
+# Uma tabela por indicador, só com o que difere do padrão; apagar a tabela volta ao padrão.
+# `mt5-terminal ctl state` lista os indicadores ("indicators") e as opções de cada um.
+# [studies.<indicador>]
+# <opção> = <valor>
+
 [mt5]
 # Abrir o MetaTrader 5 ao iniciar, se ele não estiver aberto.
 auto_start = true
@@ -187,7 +193,7 @@ impl Colors {
     }
 
     pub fn color(&self, key: &str) -> Color32 {
-        hex(self.get(key)).unwrap_or(Color32::MAGENTA)
+        parse_hex(self.get(key)).unwrap_or(Color32::MAGENTA)
     }
 }
 
@@ -277,6 +283,9 @@ pub struct Settings {
     pub ticket: Ticket,
     #[serde(default)]
     pub presets: Vec<Preset>,
+    /// `[studies.<indicator>]`: the options each indicator changed (checked by the preset).
+    #[serde(default)]
+    pub studies: toml::Table,
 }
 
 impl Default for Settings {
@@ -296,7 +305,7 @@ pub fn mtime() -> Option<SystemTime> {
     path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
 }
 
-fn hex(s: &str) -> Option<Color32> {
+pub fn parse_hex(s: &str) -> Option<Color32> {
     let h = s.strip_prefix('#')?;
     if h.len() != 6 {
         return None;
@@ -344,6 +353,8 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
     let mut known = merged.clone();
     known.insert("accounts".into(), toml::Value::Array(Vec::new()));
     known.insert("presets".into(), toml::Value::Array(Vec::new()));
+    // checked by the indicators themselves (they know their options)
+    known.insert("studies".into(), toml::Value::Array(Vec::new()));
     unknown_keys(&user, &known, "", &mut warnings);
     let warnings_unknown: Vec<String> = warnings.drain(..).map(|k| format!("chave desconhecida: {k}")).collect();
     for (section, value) in user {
@@ -365,31 +376,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
         warnings.push(format!("chart.first_bars = {} fora de 100..20000; usando 1000", s.chart.first_bars));
         s.chart.first_bars = 1000;
     }
-    if !(20..=2000).contains(&s.fibonacci.lookback) {
-        return Err("fibonacci.lookback: use 20..2000 candles fechados".into());
-    }
-    if !(1..=10).contains(&s.fibonacci.pivot_bars)
-        || 2 * s.fibonacci.pivot_bars + 3 > s.fibonacci.lookback
-    {
-        return Err("fibonacci.pivot_bars: use 1..10 e lookback >= 2 * pivot_bars + 3".into());
-    }
-    if s.fibonacci.levels.is_empty()
-        || s.fibonacci.levels.len() > 12
-        || s.fibonacci
-            .levels
-            .iter()
-            .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
-    {
-        return Err("fibonacci.levels: de 1 a 12 proporções finitas entre 0 e 1".into());
-    }
-    for (i, v) in s.fibonacci.levels.iter().enumerate() {
-        if s.fibonacci.levels[..i]
-            .iter()
-            .any(|other| (other - v).abs() < 1e-9)
-        {
-            return Err("fibonacci.levels: cada proporção deve aparecer uma vez".into());
-        }
-    }
+    check_fibonacci(&s.fibonacci)?;
     if s.chart.symbols.is_empty() {
         warnings.push("chart.symbols vazio; usando o padrão".into());
         s.chart.symbols = Settings::default().chart.symbols;
@@ -411,11 +398,41 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
     }
     for (key, _) in COLOR_KEYS {
         let v = s.colors.get(key);
-        if hex(v).is_none() {
+        if parse_hex(v).is_none() {
             return Err(format!("colors.{key} = {v:?}: use \"#rrggbb\""));
         }
     }
     Ok((s, warnings))
+}
+
+/// The `[fibonacci]` rules (also checked by the indicator editor before saving).
+pub fn check_fibonacci(f: &Fibonacci) -> Result<(), String> {
+    if !(20..=2000).contains(&f.lookback) {
+        return Err("fibonacci.lookback: use 20..2000 candles fechados".into());
+    }
+    if !(1..=10).contains(&f.pivot_bars)
+        || 2 * f.pivot_bars + 3 > f.lookback
+    {
+        return Err("fibonacci.pivot_bars: use 1..10 e lookback >= 2 * pivot_bars + 3".into());
+    }
+    if f.levels.is_empty()
+        || f.levels.len() > 12
+        || f
+            .levels
+            .iter()
+            .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+    {
+        return Err("fibonacci.levels: de 1 a 12 proporções finitas entre 0 e 1".into());
+    }
+    for (i, v) in f.levels.iter().enumerate() {
+        if f.levels[..i]
+            .iter()
+            .any(|other| (other - v).abs() < 1e-9)
+        {
+            return Err("fibonacci.levels: cada proporção deve aparecer uma vez".into());
+        }
+    }
+    Ok(())
 }
 
 impl Settings {
@@ -582,6 +599,55 @@ pub fn save_colors(colors: &Colors) -> std::io::Result<()> {
     std::fs::write(p, doc.to_string())
 }
 
+/// Replace `[studies.<key>]` with `values` (none: the table goes, back to the defaults).
+pub fn save_study(key: &str, values: &toml::Table) -> std::io::Result<()> {
+    let p = Settings::init()?;
+    let text = std::fs::read_to_string(&p)?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(std::io::Error::other)?;
+    if !doc.contains_table("studies") {
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(true);
+        doc.insert("studies", toml_edit::Item::Table(t));
+    }
+    let studies = doc["studies"].as_table_mut().ok_or_else(|| std::io::Error::other("studies não é uma tabela"))?;
+    if values.is_empty() {
+        studies.remove(key);
+    } else {
+        let mut t = toml_edit::Table::new();
+        for (k, v) in values {
+            t[k.as_str()] = toml_edit::value(edit_value(v));
+        }
+        studies.insert(key, toml_edit::Item::Table(t));
+    }
+    std::fs::write(&p, doc.to_string())
+}
+
+fn edit_value(v: &toml::Value) -> toml_edit::Value {
+    match v {
+        toml::Value::Boolean(b) => (*b).into(),
+        toml::Value::Integer(i) => (*i).into(),
+        toml::Value::Float(x) => (*x).into(),
+        toml::Value::Array(a) => a.iter().map(edit_value).collect::<toml_edit::Array>().into(),
+        other => other.as_str().map(String::from).unwrap_or_else(|| other.to_string()).into(),
+    }
+}
+
+/// Write `[fibonacci]` in place (comments kept).
+pub fn save_fibonacci(f: &Fibonacci) -> std::io::Result<()> {
+    let p = Settings::init()?;
+    let text = std::fs::read_to_string(&p)?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(std::io::Error::other)?;
+    if !doc.contains_table("fibonacci") {
+        doc["fibonacci"] = toml_edit::table();
+    }
+    let fib = &mut doc["fibonacci"];
+    fib["enabled"] = toml_edit::value(f.enabled);
+    fib["lookback"] = toml_edit::value(f.lookback as i64);
+    fib["pivot_bars"] = toml_edit::value(f.pivot_bars as i64);
+    fib["levels"] = toml_edit::value(f.levels.iter().copied().collect::<toml_edit::Array>());
+    std::fs::write(&p, doc.to_string())
+}
+
 pub fn save_chart(layers: &[Layer], show_studies: bool) -> std::io::Result<()> {
     let array: toml_edit::Array = layers.iter().map(|l| l.key()).collect();
     edit_chart(|chart| {
@@ -661,7 +727,7 @@ mod tests {
         assert_eq!((s.colors.up.as_str(), s.colors.candle_up.as_str()), ("#00ff00", "#26a69a"));
         for (name, c) in presets() {
             for (key, _) in COLOR_KEYS {
-                assert!(hex(c.get(key)).is_some(), "{name}: {key}");
+                assert!(parse_hex(c.get(key)).is_some(), "{name}: {key}");
             }
         }
         assert_eq!(color_hex(Color32::from_rgb(1, 2, 255)), "#0102ff");

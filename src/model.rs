@@ -81,6 +81,8 @@ pub struct Bar {
 #[derive(Clone, Debug, Default)]
 pub struct Series {
     pub bars: Vec<Bar>,
+    /// Corrections or insertions in closed history; forming ticks and appended bars do not change it.
+    pub history_revision: u64,
     /// Last bid seen, for the price line even before the bar closes.
     pub last: Option<f64>,
     pub digits: u32,
@@ -89,7 +91,7 @@ pub struct Series {
 impl Series {
     pub fn new(bars: Vec<Bar>, digits: u32) -> Self {
         let last = bars.last().map(|b| b.close);
-        Self { bars, last, digits }
+        Self { bars, last, digits, history_revision: 0 }
     }
 
     /// Fold a tick into the series: extends the forming bar or opens a new one.
@@ -117,11 +119,21 @@ impl Series {
             self.bars.splice(0..0, bars.iter().copied());
             return;
         }
+        let mut corrected = false;
         for bar in bars {
             match self.bars.binary_search_by_key(&bar.time, |b| b.time) {
-                Ok(i) => self.bars[i] = *bar,
-                Err(i) => self.bars.insert(i, *bar),
+                Ok(i) => {
+                    corrected |= i + 1 < self.bars.len() && self.bars[i] != *bar;
+                    self.bars[i] = *bar;
+                }
+                Err(i) => {
+                    corrected |= i < self.bars.len();
+                    self.bars.insert(i, *bar);
+                }
             }
+        }
+        if corrected {
+            self.history_revision = self.history_revision.wrapping_add(1);
         }
         if self.last.is_none() {
             self.last = self.bars.last().map(|b| b.close);
@@ -315,6 +327,29 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_revision_tracks_closed_corrections_without_invalidating_ticks() {
+        let mut s = Series::default();
+        for t in [0, 60, 120] {
+            s.apply_tick(Timeframe::M1, t, 10.0, 1.0);
+        }
+        let mut forming = s.bars[2];
+        forming.close = 11.0;
+        s.merge(&[forming]);
+        s.merge(&s.bars.clone());
+        assert_eq!(s.history_revision, 0);
+        let mut closed = s.bars[1];
+        closed.close = 12.0;
+        s.merge(&[closed]);
+        assert_eq!(s.history_revision, 1);
+        s.merge(&[closed]);
+        s.apply_tick(Timeframe::M1, 180, 13.0, 1.0);
+        assert_eq!(s.history_revision, 1);
+        let inserted = Bar { time: 90, ..closed };
+        s.merge(&[inserted]);
+        assert_eq!(s.history_revision, 2);
+    }
 
     #[test]
     fn week_opens_on_sunday() {

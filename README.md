@@ -25,6 +25,10 @@ TCP and relays quotes, history, positions and orders.
   on the order that follows your pointer.
 - **A full order ticket.** Market, limit and stop orders, flatten, reverse (netting and hedging),
   breakeven, and keyboard shortcuts.
+- **Daily account result.** The ticket shows today's realized result including costs, current floating
+  result and their total in account currency, across all symbols. The broker's server day determines
+  the cutoff; deposits and withdrawals are excluded. The total stays in the status bar when the ticket
+  is collapsed. Requires TerminalBridge v7; the Synthetic source uses UTC.
 - **Safe by default.** Real accounts stay locked until you arm the ticket; your password stays in MT5;
   a **Synthetic** source with a simulated broker lets you try everything risk-free.
 - **Configurable by you or by an AI agent.** Everything lives in a commented `config.toml`, applied
@@ -53,6 +57,10 @@ Every action goes through the same safety locks as the ticket.
 - Three cursor modes: **Arrow**, **Hand** (drag the chart) and **Crosshair** (click and drag to
   measure the % change and the distance in bars; Esc clears).
 - Keyboard: ←/→ pan, +/− zoom.
+- Jump to a day: enter **DD/MM/YYYY** (or **YYYY-MM-DD**) in **Ir para data** and press Enter or
+  **Ir**. Older history loads in chunks; dates use the chart's server time. A day without candles
+  shows the next available session (or the nearest end of the available history). **Hoje** cancels
+  a pending search, returns to the latest candles and resumes following the market, keeping the zoom.
 - Price is drawn on top of everything by default; the layer order (levels, indicators, positions,
   price) is set in the **Camadas** (Layers) menu.
 - More room when you need it: the ticket collapses to a thin strip (»/«) and the indicator pane

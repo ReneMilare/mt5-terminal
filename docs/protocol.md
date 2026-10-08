@@ -33,6 +33,7 @@ horários são do servidor do MT5 (barras em segundos, ticks em milissegundos).
 | `bars` | `symbol`, `tf`, `digits`, `bars: [[time, open, high, low, close, tick_volume], ..]` |
 | `tick` | `symbol`, `time_msc`, `bid`, `ask`, `volume` (volume real; 1 por tick em CFD) |
 | `account` | `balance`, `equity`, `margin_free`, `currency`, `trade_allowed` |
+| `daily_result` (v7) | `day_start` (meia-noite do servidor, em segundos), `realized` (número ou `null` enquanto carrega), `floating`, `currency` |
 | `positions` | `positions: [{ticket, symbol, side, volume, price, sl, tp, profit}, ..]` (todas as posições da conta) |
 | `orders` | `orders: [{ticket, symbol, side, kind, volume, price, sl, tp}, ..]` (todas as pendentes) |
 | `trade_result` | `id`, `ok`, `retcode` (MT5), `msg`, `ticket`, `price` |
@@ -43,6 +44,13 @@ horários são do servidor do MT5 (barras em segundos, ticks em milissegundos).
 
 `account`, `positions` e `orders` são retratos completos, enviados na conexão e depois só quando mudam
 (verificado a cada 100 ms e a cada transação). `profit` inclui swap.
+
+`daily_result` é da conta inteira: soma lucro/prejuízo, comissões (inclusive de entrada ou lançadas
+separadamente), swap e taxas dos negócios de hoje; depósitos e saques ficam fora. `floating` é o resultado
+atual de todas as posições, inclusive abertas em dias anteriores; o total exibido é `realized + floating`.
+O histórico só é relido na conexão inicial, ao virar o dia do servidor ou após inclusão/correção/exclusão
+de negócio; falhas tentam novamente 1x/s e enviam `realized: null`. O retrato sai na conexão e quando muda.
+No Sintético, o dia usa UTC.
 
 ## Execução
 

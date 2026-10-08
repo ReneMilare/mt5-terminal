@@ -10,6 +10,7 @@ mod feed;
 mod history;
 mod launcher;
 mod model;
+mod navigation;
 #[cfg(has_preset)]
 #[path = "../preset/mod.rs"]
 mod preset;
@@ -88,11 +89,16 @@ struct App {
     /// The presets editor is open; presets changed and not yet written.
     presets_open: bool,
     presets_dirty: bool,
+    /// Indicator whose options are open (right click on it), and the text of its Fibonacci levels.
+    study_open: Option<&'static str>,
+    study_dirty: bool,
+    fib_levels: String,
     /// Account switch waiting for confirmation (switching to a real account asks first).
     confirm_switch: Option<settings::Account>,
     /// Account switch in progress: its reports, and the login it goes to.
     switching: Option<(crossbeam_channel::Receiver<String>, i64)>,
     view: ChartView,
+    navigation: navigation::DateNavigation,
     /// Last tick server time (ms) and when it arrived, to extrapolate server time.
     last_tick: Option<(i64, Instant)>,
     status: Option<String>,
@@ -133,7 +139,7 @@ impl App {
             source: Source::Mt5,
             connected: false,
             account: None,
-            studies: Studies::new(&symbol, tf, &settings.fibonacci),
+            studies: Studies::new(&symbol, tf, &settings.fibonacci, &settings.studies),
             symbol,
             tf,
             store: Store::default(),
@@ -155,9 +161,13 @@ impl App {
             colors_dirty: false,
             presets_open: false,
             presets_dirty: false,
+            study_open: None,
+            study_dirty: false,
+            fib_levels: String::new(),
             confirm_switch: None,
             switching: None,
             view: ChartView::default(),
+            navigation: navigation::DateNavigation::default(),
             last_tick: None,
             status: config_status,
             trading: Trading::default(),
@@ -203,9 +213,10 @@ impl App {
 
     fn clear_chart(&mut self) {
         self.view.reset();
+        self.navigation.clear();
         self.delta_last_bar = 0;
         self.last_tick = None;
-        self.studies = Studies::new(&self.symbol, self.tf, &self.settings.fibonacci);
+        self.studies = Studies::new(&self.symbol, self.tf, &self.settings.fibonacci, &self.settings.studies);
     }
 
     fn series(&self) -> Option<&Series> {
@@ -237,6 +248,9 @@ impl App {
         }
         let (store, loader, sym, tf) = (&self.store, &mut self.loader, self.symbol.as_str(), self.tf);
         let mut cmds = Vec::new();
+        if let Some(time) = self.navigation.target {
+            cmds.extend(loader.older(store, sym, tf, Need::At { time }));
+        }
         if self.view.wants_older {
             cmds.extend(loader.older(store, sym, tf, Need::More));
         }
@@ -311,11 +325,14 @@ impl App {
             match ev {
                 Event::Connected => {
                     self.connected = true;
+                    self.trading.reset();
                     self.mt5_starting = false;
                     self.status = None;
                     self.store.clear();
                     self.loader.clear();
+                    let target_date = self.navigation.target;
                     self.clear_chart();
+                    self.navigation.target = target_date;
                     self.request();
                     #[cfg(has_preset)]
                     if let Some(v) = self.verify.as_mut() {
@@ -472,6 +489,43 @@ impl App {
         });
     }
 
+    fn navigation_bar(&mut self, ui: &mut egui::Ui) {
+        let today = self.server_now()
+            .and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
+            .map(|t| t.date_naive())
+            .unwrap_or_else(|| chrono::Local::now().date_naive());
+        ui.horizontal_centered(|ui| {
+            ui.label("Ir para data:");
+            let input = ui.add(egui::TextEdit::singleline(&mut self.navigation.input)
+                .id_salt("chart-date").hint_text("DD/MM/AAAA").desired_width(100.0).char_limit(10))
+                .on_hover_text("Data do gráfico (horário do servidor). Aceita DD/MM/AAAA ou AAAA-MM-DD.");
+            let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button("Ir").clicked() || enter {
+                self.navigation.request(today);
+            }
+            if ui.button("Hoje").on_hover_text("Voltar aos candles mais recentes e acompanhar o mercado").clicked() {
+                self.navigation.clear();
+                self.navigation.input = today.format("%d/%m/%Y").to_string();
+                self.view.reset();
+            }
+            if let Some(time) = self.navigation.target {
+                let date = chrono::DateTime::from_timestamp(time, 0).unwrap();
+                let text = if self.connected {
+                    format!("Buscando {}…", date.format("%d/%m/%Y"))
+                } else {
+                    "Aguardando conexão para buscar a data…".into()
+                };
+                ui.label(RichText::new(text).color(self.pal.warn).size(12.0));
+            } else if let Some(message) = &self.navigation.message {
+                ui.label(RichText::new(message).color(self.pal.text_dim).size(12.0));
+            }
+        });
+        if let Some(time) = self.navigation.resolve(&self.store, &self.loader, &self.symbol, self.tf) {
+            self.view.go_to(time);
+            ui.ctx().request_repaint();
+        }
+    }
+
     /// Drawing order of the plot, front first, with buttons to move each layer.
     fn layers_menu(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Na frente").color(self.pal.text_dim).size(11.5));
@@ -524,10 +578,12 @@ impl App {
                 theme::apply(&self.wake, &self.pal);
                 self.trading.set_presets(&s.presets, &s.ticket.preset);
                 let fibonacci_changed = self.studies.configure_fibonacci(&s.fibonacci);
+                let (studies_changed, invalid) = self.studies.configure(&s.studies);
                 self.settings = s;
-                if fibonacci_changed && self.connected {
+                if (fibonacci_changed || studies_changed) && self.connected {
                     self.request();
                 }
+                let warnings: Vec<String> = warnings.into_iter().chain(invalid).collect();
                 self.status = (!warnings.is_empty()).then(|| format!("config: {}", warnings.join("; ")));
             }
             Err(e) => self.status = Some(format!("config.toml inválido (mantida a anterior): {e}")),
@@ -571,8 +627,13 @@ impl App {
             "layers": self.settings.chart.layers.iter().map(|l| l.key()).collect::<Vec<_>>(),
             "cursor": self.settings.chart.cursor.key(),
             "fibonacci": self.studies.fibonacci_state(),
+            "indicators": self.studies.params().iter().map(|p| p.state()).collect::<Vec<_>>(),
             "positions": self.trading.positions.len(),
             "orders": self.trading.orders.len(),
+            "daily_result": self.trading.day_result.as_ref().map(|day| serde_json::json!({
+                "day_start": day.day_start, "realized": day.realized, "floating": day.floating,
+                "total": day.total(), "currency": day.currency,
+            })),
             "config": settings::path(),
             "status": self.status,
         })
@@ -645,6 +706,113 @@ impl App {
         }
         if !open {
             self.colors_open = false;
+        }
+    }
+
+    /// The options of one indicator (right click on it in the chart): applied live, written to
+    /// `[studies.<key>]` once the mouse is released (not on every step of a drag).
+    fn study_window(&mut self, ctx: &egui::Context) {
+        let Some(key) = self.study_open else { return };
+        let Some(mut params) = self.studies.params().iter().find(|p| p.key == key).cloned() else {
+            self.study_open = None;
+            return;
+        };
+        if self.fib_levels.is_empty() {
+            self.fib_levels = fib_text(&self.settings.fibonacci.levels);
+        }
+        let mut open = true;
+        let (mut changed, mut reset) = (false, false);
+        let mut fib = self.settings.fibonacci.clone();
+        let mut fib_changed = false;
+        let mut fib_error = None;
+        egui::Window::new(params.name).id(egui::Id::new(("study", key))).open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+            changed = params.edit_ui(ui);
+            if params.fibonacci {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Fibonacci (M5, M15, H1, D1)").strong());
+                egui::Grid::new("fibonacci").num_columns(2).min_col_width(170.0).spacing([16.0, 6.0]).show(ui, |ui| {
+                    ui.label("Ligado");
+                    fib_changed |= ui.checkbox(&mut fib.enabled, "").changed();
+                    ui.end_row();
+                    ui.label("Busca (candles fechados)");
+                    fib_changed |= ui.add(egui::DragValue::new(&mut fib.lookback).range(20..=2000)).changed();
+                    ui.end_row();
+                    ui.label("Candles que confirmam o pivô");
+                    fib_changed |= ui.add(egui::DragValue::new(&mut fib.pivot_bars).range(1..=10)).changed();
+                    ui.end_row();
+                    ui.label("Retrações");
+                    let edit = ui.add(egui::TextEdit::singleline(&mut self.fib_levels).desired_width(180.0));
+                    if edit.lost_focus() {
+                        let parsed: Result<Vec<f64>, _> =
+                            self.fib_levels.split([',', ';', ' ']).filter(|t| !t.is_empty()).map(|t| t.parse::<f64>()).collect();
+                        match parsed {
+                            Ok(levels) if levels != fib.levels => {
+                                fib.levels = levels;
+                                fib_changed = true;
+                            }
+                            Ok(_) => {}
+                            Err(_) => fib_error = Some("retrações: números separados por vírgula, ex.: 0.382, 0.5, 0.618".to_string()),
+                        }
+                    }
+                    ui.end_row();
+                });
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                reset = ui.button("Padrão").on_hover_text("Volta todas as opções deste indicador ao padrão").clicked();
+                let fib = if params.fibonacci { " e [fibonacci]" } else { "" };
+                ui.label(RichText::new(format!("Gravado no config.toml, [studies.{key}]{fib}.")).color(self.pal.text_dim).size(11.5));
+            });
+        });
+        if reset {
+            for p in &mut params.params {
+                p.value = p.default.clone();
+            }
+            changed = true;
+        }
+        if changed {
+            let table = params.to_table();
+            if table.is_empty() {
+                self.settings.studies.remove(key);
+            } else {
+                self.settings.studies.insert(key.to_string(), toml::Value::Table(table));
+            }
+            let (needs_changed, _) = self.studies.configure(&self.settings.studies);
+            if needs_changed && self.connected {
+                self.request();
+            }
+            self.study_dirty = true;
+        }
+        if fib_changed {
+            match settings::check_fibonacci(&fib) {
+                Ok(()) => {
+                    self.fib_levels = fib_text(&fib.levels);
+                    if self.studies.configure_fibonacci(&fib) && self.connected {
+                        self.request();
+                    }
+                    self.settings.fibonacci = fib;
+                    if let Err(e) = settings::save_fibonacci(&self.settings.fibonacci) {
+                        self.status = Some(format!("não gravou o config.toml: {e}"));
+                    }
+                    self.config_mtime = settings::mtime();
+                }
+                Err(e) => fib_error = Some(e),
+            }
+        }
+        if let Some(e) = fib_error {
+            self.fib_levels = fib_text(&self.settings.fibonacci.levels);
+            self.status = Some(e);
+        }
+        if self.study_dirty && !ctx.input(|i| i.pointer.any_down()) {
+            let table = self.settings.studies.get(key).and_then(|v| v.as_table()).cloned().unwrap_or_default();
+            if let Err(e) = settings::save_study(key, &table) {
+                self.status = Some(format!("não gravou o config.toml: {e}"));
+            }
+            self.config_mtime = settings::mtime();
+            self.study_dirty = false;
+        }
+        if !open {
+            self.study_open = None;
         }
     }
 
@@ -843,6 +1011,12 @@ impl App {
                 ui.separator();
                 ui.label(RichText::new(s).color(pal.warn).size(12.0));
             }
+            if self.connected {
+                ui.separator();
+                let total = self.trading.day_result.as_ref().and_then(trading::DayResult::total);
+                ui.label(RichText::new(self.trading.day_total_text()).color(trading::pnl_color(total, pal)).strong().size(12.0))
+                    .on_hover_text("Resultado da conta inteira: realizado hoje com custos + posições abertas. Detalhes na boleta.");
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let n = self.series().map(|s| s.bars.len()).unwrap_or(0);
                 ui.label(RichText::new(format!("{n} candles")).color(pal.text_dim).size(12.0));
@@ -919,6 +1093,7 @@ impl App {
         self.account_switch_ui(&ctx);
         self.colors_window(&ctx);
         self.presets_ui(&ctx);
+        self.study_window(&ctx);
         self.pump();
         egui::Panel::top("top")
             .exact_size(40.0)
@@ -970,10 +1145,14 @@ impl App {
                 .inner;
             self.send_all(cmds);
         }
+        egui::Panel::top("chart-navigation")
+            .exact_size(32.0)
+            .frame(egui::Frame::new().fill(self.pal.panel_bg).inner_margin(egui::Margin::symmetric(10, 0)))
+            .show(ui, |ui| self.navigation_bar(ui));
         self.resync();
         let server_now = self.server_now();
         if !self.studies.is_for(&self.symbol, self.tf) {
-            self.studies = Studies::new(&self.symbol, self.tf, &self.settings.fibonacci);
+            self.studies = Studies::new(&self.symbol, self.tf, &self.settings.fibonacci, &self.settings.studies);
         }
         self.load_more();
         self.finalize_delta();
@@ -1008,11 +1187,14 @@ impl App {
         let can_trade = self.trading.can_trade(self.connected, self.is_real());
         let positions = self.trading.levels(&self.symbol, &self.pal, can_trade);
         let show = self.settings.chart.show_studies;
-        let (overlays, map_levels, pane, volume, marks) = if show {
-            (self.studies.overlays(), self.studies.map_levels(), self.studies.pane(), self.studies.volume(), self.studies.marks())
+        let (overlays, map_levels, pane, volume, marks, shading, ribbon, legend) = if show {
+            let s = &self.studies;
+            (s.overlays(), s.map_levels(), s.pane(), s.volume(), s.marks(), s.shading(), s.ribbon(), s.legend())
         } else {
-            (Vec::new(), Vec::new(), None, None, None)
+            (Vec::new(), Vec::new(), None, None, None, None, None, Vec::new())
         };
+        let study_names: Vec<(&'static str, &'static str)> =
+            if show { self.studies.params().iter().map(|p| (p.key, p.name)).collect() } else { Vec::new() };
         let volume_text = self.trading.volume_text();
         let empty = Series::default();
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -1035,6 +1217,10 @@ impl App {
                 bracket: Some(self.trading.bracket()),
                 volume,
                 marks,
+                shading,
+                ribbon,
+                legend: &legend,
+                studies: &study_names,
             };
             self.view.ui(ui, &data, &self.pal);
         });
@@ -1046,12 +1232,20 @@ impl App {
                     self.settings.ui.pane_open = !self.settings.ui.pane_open;
                     self.save_ui_state();
                 }
+                chart::ChartAction::EditStudy(key) => {
+                    self.study_open = Some(key);
+                    self.fib_levels = fib_text(&self.settings.fibonacci.levels);
+                }
                 a if can_trade => cmds.extend(self.trading.chart_action(a, &self.symbol)),
                 _ => {}
             }
         }
         self.send_all(cmds);
     }
+}
+
+fn fib_text(levels: &[f64]) -> String {
+    levels.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
 }
 
 /// A small filled circle laid out like a widget (the default fonts lack bullet glyphs).
