@@ -24,12 +24,12 @@ const RIBBON_GAP: f32 = 2.0;
 const RIGHT_PAD: f64 = 6.0;
 const MIN_BAR_PX: f32 = 1.0;
 const MAX_BAR_PX: f32 = 120.0;
-/// Vertical drag (px) before a pan of the plot turns auto-scale off.
-const UNLOCK_Y_PX: f32 = 14.0;
 /// How close (px) the pointer must be to a trade line for Delete.
 const GRAB_PX: f32 = 5.0;
 /// With Alt held, how close (px) to grab a trade line and drag it (wider: Alt makes the intent clear).
 const ALT_GRAB_PX: f32 = 10.0;
+/// A label is an explicit trade handle; allow small vertical adjustments without click timing.
+const LABEL_DRAG_PX: f32 = 3.0;
 /// The × that removes an order/stop/target: a square left of the line's tag.
 const REMOVE_X: f32 = 48.0;
 const REMOVE_W: f32 = 18.0;
@@ -191,7 +191,6 @@ pub struct ChartView {
     y_lo: f64,
     y_hi: f64,
     drag: Option<Zone>,
-    drag_dy: f32,
     cursor: CursorMode,
     measurement: Option<Measurement>,
     measuring: bool,
@@ -205,6 +204,8 @@ pub struct ChartView {
     pub wants_older: bool,
     /// Trade line being dragged and where it is now.
     level_drag: Option<(Handle, f64)>,
+    /// Trade label captured on primary press, before enough motion starts a drag.
+    label_grab: Option<(Handle, Pos2)>,
     /// Price under the pointer when the context menu opened.
     menu_price: Option<f64>,
     /// Where the context menu opened, and the indicator found there.
@@ -250,7 +251,6 @@ impl Default for ChartView {
             y_lo: 0.0,
             y_hi: 1.0,
             drag: None,
-            drag_dy: 0.0,
             cursor: CursorMode::default(),
             measurement: None,
             measuring: false,
@@ -260,6 +260,7 @@ impl Default for ChartView {
             target_time: None,
             wants_older: false,
             level_drag: None,
+            label_grab: None,
             menu_price: None,
             menu_at: None,
             menu_study: None,
@@ -310,6 +311,8 @@ pub struct ChartData<'a> {
     pub legend: &'a [crate::studies::LegendItem],
     /// Editable indicators (key, name), listed in the context menu.
     pub studies: &'a [(&'static str, &'static str)],
+    /// The active chart (of several side by side): the keyboard moves it even without the pointer over it.
+    pub active: bool,
 }
 
 /// Thin rows at the bottom of the plot, a class per bar each (e.g. one state per timeframe).
@@ -455,6 +458,38 @@ pub struct Level {
     pub handle: Option<Handle>,
     /// Side of a position's entry line: dragging it out previews a target or a stop.
     pub side: Option<Side>,
+    /// Entry and monetary coefficients of a stop/target, independent of the trading lock.
+    pub value: Option<LevelValue>,
+}
+
+#[derive(Clone)]
+pub struct LevelValue {
+    pub entry: f64,
+    pub side: Side,
+    /// Account currency per point for this volume. None means the source cannot value the trade.
+    pub profit_per_point: Option<f64>,
+    pub loss_per_point: Option<f64>,
+    pub currency: String,
+}
+
+impl Level {
+    pub fn label_at(&self, price: f64) -> String {
+        let Some(value) = &self.value else { return self.label.clone() };
+        if !price.is_finite() || !value.entry.is_finite() || value.entry <= 0.0 {
+            return self.label.clone();
+        }
+        let change = (price - value.entry) * if value.side == Side::Buy { 1.0 } else { -1.0 };
+        let percent = change / value.entry * 100.0;
+        if !percent.is_finite() {
+            return self.label.clone();
+        }
+        let rate = if change >= 0.0 { value.profit_per_point } else { value.loss_per_point };
+        let money = rate.filter(|r| !value.currency.is_empty() && r.is_finite() && *r > 0.0).map(|r| change * r).filter(|v| v.is_finite());
+        let money = money.map(|v| format!("{:+.2}", if v.abs() < 0.005 { 0.0 } else { v })).unwrap_or_else(|| "—".into());
+        let percent = if percent.abs() < 0.005 { 0.0 } else { percent };
+        let money = if value.currency.is_empty() { money } else { format!("{} {money}", value.currency) };
+        format!("{} · {money} · {percent:+.2}%", self.label)
+    }
 }
 
 struct Frame {
@@ -487,9 +522,23 @@ impl Frame {
 }
 
 impl ChartView {
-    /// Forget the view (new symbol or timeframe): follow the last bar with auto-scale.
+    /// Forget the view (new symbol or timeframe), keeping zoom and the scale preference.
     pub fn reset(&mut self) {
-        *self = Self { bar_px: self.bar_px, cursor: self.cursor, ..Self::default() };
+        *self = Self { bar_px: self.bar_px, cursor: self.cursor, auto_y: self.auto_y, ..Self::default() };
+    }
+
+    pub fn auto_scale(&self) -> bool {
+        self.auto_y
+    }
+
+    /// Refit prices without changing the visible date or horizontal zoom.
+    pub fn set_auto_scale(&mut self, enabled: bool) {
+        self.auto_y = enabled;
+        if enabled {
+            self.measurement = None;
+            self.measuring = false;
+            self.drag = None;
+        }
     }
 
     /// Center a loaded bar, keeping the zoom and restoring price auto-scale.
@@ -501,6 +550,7 @@ impl ChartView {
         self.measuring = false;
         self.drag = None;
         self.level_drag = None;
+        self.label_grab = None;
         self.menu_price = None;
         self.menu_at = None;
     }
@@ -512,6 +562,7 @@ impl ChartView {
             self.measuring = false;
             self.drag = None;
             self.level_drag = None;
+            self.label_grab = None;
         }
     }
 
@@ -555,7 +606,8 @@ impl ChartView {
         self.known_first = bars[0].time;
 
         // --- keep following the market when new bars arrive -------------------------------------
-        if self.known_len == 0 {
+        let first_frame = self.known_len == 0;
+        if first_frame {
             self.right = n as f64 - 1.0 + RIGHT_PAD;
         } else if n > self.known_len && self.follow && !self.measuring {
             self.right += (n - self.known_len) as f64;
@@ -594,7 +646,50 @@ impl ChartView {
                 .map(|(h, _)| h)
         };
         let grab = |p: Pos2| grab_within(p, GRAB_PX);
-        // Alt dragging edits trades; otherwise the selected cursor controls plot gestures.
+        // The visible trade label itself is a drag handle, independent of double-click timing.
+        // This also captures a double-click-and-hold as soon as the second press arrives.
+        // Hit-test the painted tag, in reverse paint order, excluding the separate ×.
+        let label_at = |p: Pos2| -> Option<Handle> {
+            let on_axis = price_axis.contains(p);
+            if !on_axis && (!plot.contains(p) || p.x < plot.left() + 70.0) {
+                return None;
+            }
+            data.levels.iter().rev().find(|level| {
+                let y = ((y_at(level.price) * ppp).floor() + 0.5) / ppp;
+                if !plot.y_range().contains(y) || (p.y - y).abs() > 9.5 {
+                    return false;
+                }
+                if on_axis {
+                    return trade_price_tag(price_axis, y).contains(p);
+                }
+                let galley = painter.layout_no_wrap(level.label_at(level.price), FontId::proportional(11.0), Color32::WHITE);
+                trade_tag(plot, y, galley.size()).contains(p)
+            }).and_then(|level| level.handle)
+        };
+        // Process in event order: a release and the next press can arrive in the same frame.
+        let chart_pointer_active = response.contains_pointer() || response.is_pointer_button_down_on()
+            || response.clicked_by(egui::PointerButton::Primary)
+            || response.dragged_by(egui::PointerButton::Primary)
+            || response.drag_stopped_by(egui::PointerButton::Primary);
+        // Layout during hit-testing needs the context unlocked; copy only pointer events.
+        let pointer_events = ui.input(|i| i.events.iter().filter(|e| matches!(e,
+            egui::Event::PointerButton { button: egui::PointerButton::Primary, .. }
+        )).cloned().collect::<Vec<_>>());
+        let mut released_at = None;
+        for event in pointer_events {
+            match event {
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers } => {
+                    released_at = None;
+                    let handle = if chart_pointer_active && !modifiers.shift && !modifiers.ctrl { label_at(pos) } else { None };
+                    self.label_grab = handle.map(|h| (h, pos));
+                }
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, .. } => {
+                    released_at = Some(pos);
+                }
+                _ => {}
+            }
+        }
+        // Alt dragging edits any trade line; otherwise the selected cursor controls plot gestures.
         let alt = ui.input(|i| i.modifiers.alt);
         let alt_grab = |p: Pos2| {
             if alt { grab_within(p, ALT_GRAB_PX) } else { None
@@ -649,7 +744,7 @@ impl ChartView {
                     CursorIcon::PointingHand
                 }
                 _ if ghost.is_some() => CursorIcon::Crosshair,
-                Zone::Plot if self.drag.is_none() && alt_grab(p).is_some() => {
+                Zone::Plot if self.drag.is_none() && (alt_grab(p).is_some() || label_at(p).is_some() || self.label_grab.is_some()) => {
                     CursorIcon::ResizeVertical
                 }
                 Zone::PriceAxis => CursorIcon::ResizeVertical,
@@ -659,9 +754,9 @@ impl ChartView {
             });
         }
 
-        // y range before this frame's input, needed to unlock auto-scale smoothly
+        // Fit the first frame even in manual mode, then keep its range until the user adjusts it.
         let (auto_lo, auto_hi) = self.auto_range(bars, data.series.last, quote, plot.width());
-        if self.auto_y && !self.measuring {
+        if first_frame || (self.auto_y && !self.measuring) {
             (self.y_lo, self.y_hi) = (auto_lo, auto_hi);
         }
 
@@ -674,11 +769,21 @@ impl ChartView {
                 .round().clamp(0.0, (n - 1) as f64) as usize,
             price: snap_price(price_at(p.y.clamp(plot.top(), plot.bottom()))),
         };
-        if response.drag_started_by(egui::PointerButton::Primary) {
+        // egui also starts a drag after a long hold without motion; a captured label waits for motion.
+        let label_drag_started = self.label_grab.is_some_and(|(_, origin)| {
+            released_at.or_else(|| ui.input(|i| i.pointer.interact_pos())).is_some_and(|p| {
+                (p.y - origin.y).abs() > LABEL_DRAG_PX
+            })
+        });
+        if (response.drag_started_by(egui::PointerButton::Primary) && self.label_grab.is_none())
+            || (label_drag_started && self.level_drag.is_none())
+        {
             // where the button went down: egui reports a drag only after the pointer has moved a few
             // pixels, by then off a thin line (a fast hand would pan instead of grabbing it)
-            let at = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos());
-            match at.and_then(|p| alt_grab(p).map(|h| (h, price_at(p.y)))) {
+            let at = self.label_grab.map(|(_, p)| p).or_else(|| ui.input(|i| i.pointer.press_origin()))
+                .or_else(|| response.interact_pointer_pos());
+            match at.and_then(|p| self.label_grab.map(|(h, _)| h).filter(|h| data.levels.iter().any(|l| l.handle == Some(*h)))
+                .or_else(|| alt_grab(p)).map(|h| (h, price_at(p.y)))) {
                 Some(grabbed) => self.level_drag = Some(grabbed),
                 None => match at.map(zone_at) {
                     Some(Zone::Plot) => {
@@ -697,7 +802,6 @@ impl ChartView {
                     zone => self.drag = zone,
                 },
             }
-            self.drag_dy = 0.0;
         }
         if self.measuring {
             if let Some(p) = response.interact_pointer_pos()
@@ -710,10 +814,12 @@ impl ChartView {
             }
         }
         if let Some((h, _)) = self.level_drag {
-            if let Some(p) = response.interact_pointer_pos().or(hover) {
+            if let Some(p) = released_at.or_else(|| response.interact_pointer_pos()).or(hover) {
                 self.level_drag = Some((h, price_at(p.y)));
             }
-            if response.drag_stopped()
+            // PointerGone can suppress egui's drag_stopped flag in the release frame.
+            // The actual primary release still completes the captured trade gesture.
+            if (released_at.is_some() || response.drag_stopped_by(egui::PointerButton::Primary))
                 && let Some((handle, price)) = self.level_drag.take()
             {
                 self.actions.push(ChartAction::Move { handle, price });
@@ -745,10 +851,6 @@ impl ChartView {
             match self.drag {
                 Some(Zone::Plot) => {
                     self.right -= (d.x / self.bar_px) as f64;
-                    self.drag_dy += d.y;
-                    if self.auto_y && self.drag_dy.abs() > UNLOCK_Y_PX {
-                        self.auto_y = false;
-                    }
                     if !self.auto_y {
                         let per_px = (self.y_hi - self.y_lo) / plot.height() as f64;
                         self.y_lo += d.y as f64 * per_px;
@@ -773,7 +875,10 @@ impl ChartView {
         if response.drag_stopped() {
             self.drag = None;
         }
-        if response.double_clicked() {
+        if !ui.input(|i| i.pointer.primary_down()) {
+            self.label_grab = None;
+        }
+        if response.double_clicked() && response.interact_pointer_pos().and_then(label_at).is_none() {
             match response.interact_pointer_pos().map(zone_at) {
                 Some(Zone::PriceAxis) => self.auto_y = true,
                 Some(Zone::TimeAxis) => {
@@ -809,7 +914,7 @@ impl ChartView {
 
         // keyboard: arrows pan a tenth of the screen, +/- zoom at the right edge (not while typing)
         if !ui.ctx().egui_wants_keyboard_input()
-            && (response.hovered() || ui.ctx().memory(|m| m.focused().is_none()))
+            && (response.hovered() || (data.active && ui.ctx().memory(|m| m.focused().is_none())))
         {
             let (back, fwd, zin, zout) = ui.input(|i| {
                 (
@@ -1073,7 +1178,7 @@ impl ChartView {
                                 4.0,
                             ));
                         }
-                        let price = dragged.unwrap_or(level.price);
+                        let price = snap_price(dragged.unwrap_or(level.price));
                         let y = f.snap(f.y(price), true);
                         if !plot.y_range().contains(y) {
                             continue;
@@ -1085,10 +1190,13 @@ impl ChartView {
                         } else {
                             plot_painter.line_segment(line, stroke);
                         }
-                        let galley = painter.layout_no_wrap(level.label.clone(), FontId::proportional(11.0), Color32::WHITE);
-                        let tag = Rect::from_min_size(Pos2::new(plot.left() + 70.0, y - 9.0), Vec2::new(galley.size().x + 12.0, 18.0));
+                        let galley = painter.layout_no_wrap(level.label_at(price), FontId::proportional(11.0), Color32::WHITE);
+                        let tag = trade_tag(plot, y, galley.size());
                         plot_painter.rect_filled(tag, CornerRadius::same(3), level.color);
                         plot_painter.galley(tag.center() - galley.size() / 2.0, galley, Color32::WHITE);
+                        if level.value.is_some() && self.level_drag.is_none() && hover.is_some_and(|p| tag.contains(p)) {
+                            response.clone().on_hover_text("Resultado bruto estimado na moeda da conta, sem comissões e swap.\nPercentual do preço de entrada, positivo no ganho e negativo na perda.");
+                        }
                         if level.handle.is_some_and(removable) && dragged.is_none() {
                             let x = Rect::from_min_size(Pos2::new(plot.left() + REMOVE_X, y - REMOVE_W / 2.0), Vec2::splat(REMOVE_W));
                             let hot = hover.is_some_and(|p| x.contains(p));
@@ -1098,7 +1206,7 @@ impl ChartView {
                             plot_painter.line_segment([a, b], stroke);
                             plot_painter.line_segment([Pos2::new(a.x, b.y), Pos2::new(b.x, a.y)], stroke);
                         }
-                        let ptag = Rect::from_min_size(Pos2::new(price_axis.left() + 1.0, y - 9.5), Vec2::new(PRICE_AXIS_W - 2.0, 19.0));
+                        let ptag = trade_price_tag(price_axis, y);
                         painter.rect_filled(ptag, CornerRadius::same(3), level.color);
                         painter.text(
                             Pos2::new(ptag.left() + 7.0, y),
@@ -1436,6 +1544,14 @@ impl ChartView {
     }
 }
 
+fn trade_tag(plot: Rect, y: f32, text_size: Vec2) -> Rect {
+    Rect::from_min_size(Pos2::new(plot.left() + 70.0, y - 9.0), Vec2::new(text_size.x + 12.0, 18.0))
+}
+
+fn trade_price_tag(axis: Rect, y: f32) -> Rect {
+    Rect::from_min_size(Pos2::new(axis.left() + 1.0, y - 9.5), Vec2::new(PRICE_AXIS_W - 2.0, 19.0))
+}
+
 fn draw_measurement(painter: &egui::Painter, f: &Frame, m: Measurement, digits: u32, pal: &Palette) {
     let start = Pos2::new(f.x(m.start.bar as f64), f.y(m.start.price));
     let end = Pos2::new(f.x(m.end.bar as f64), f.y(m.end.price));
@@ -1677,9 +1793,13 @@ mod tests {
     }
 
     fn chart_frame(ctx: &egui::Context, view: &mut ChartView, data: &ChartData, events: Vec<egui::Event>) -> egui::FullOutput {
+        chart_frame_at(ctx, view, data, events, None)
+    }
+
+    fn chart_frame_at(ctx: &egui::Context, view: &mut ChartView, data: &ChartData, events: Vec<egui::Event>, time: Option<f64>) -> egui::FullOutput {
         let mut output = ctx.run_ui(egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
-            events, ..Default::default()
+            events, time, ..Default::default()
         }, |ui| {
             egui::CentralPanel::no_frame().show(ui, |ui| view.ui(ui, data, &Palette::default()));
         });
@@ -1689,6 +1809,261 @@ mod tests {
 
     fn pointer_button(pos: Pos2, pressed: bool) -> egui::Event {
         egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    fn trade_data<'a>(series: &'a Series, levels: &'a [Level], cursor: CursorMode) -> ChartData<'a> {
+        ChartData {
+            series, symbol: "X", tf: Timeframe::M5, server_now: None,
+            levels, overlays: &[], map_levels: &[], pane: None, pane_open: false,
+            layers: &Layer::DEFAULT, quote: Some((100.0, 100.25)), can_trade: true, cursor,
+            tick: 0.25, order_volume: "1", bracket: None, volume: None, marks: None,
+            shading: None, ribbon: None, legend: &[], studies: &[], active: true,
+        }
+    }
+
+    #[test]
+    fn annotated_label_can_be_dragged_from_its_percent_and_updates_its_money_preview() {
+        let series = Series::new(vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }], 2);
+        let handle = Handle::Tp(1);
+        let levels = [Level { price: 100.0, color: Color32::GREEN, label: "TP #1".into(), dashed: true, handle: Some(handle), side: None,
+            value: Some(LevelValue { entry: 90.0, side: Side::Buy, profit_per_point: Some(2.0), loss_per_point: Some(3.0), currency: "USD".into() }) }];
+        let data = trade_data(&series, &levels, CursorMode::Hand);
+        let ctx = egui::Context::default();
+        let mut view = ChartView::default();
+        let initial_text = levels[0].label_at(100.0);
+        let output = chart_frame_at(&ctx, &mut view, &data, vec![], Some(0.0));
+        let start = output.shapes.iter().find_map(|s| match &s.shape {
+            Shape::Text(t) if t.galley.job.text == initial_text => Some(t.pos + Vec2::new(t.galley.size().x - 3.0, t.galley.size().y / 2.0)),
+            _ => None,
+        }).unwrap();
+        assert!(start.x > 180.0, "grab the new percentage, beyond the original ticket label");
+        chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(start), pointer_button(start, true)], Some(0.1));
+        assert_eq!(view.label_grab, Some((handle, start)));
+        let end = start + Vec2::new(0.0, -60.0);
+        let output = chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(end)], Some(0.2));
+        let price = view.level_drag.unwrap().1;
+        let snapped = (price / data.tick).round() * data.tick;
+        let preview_text = levels[0].label_at(snapped);
+        assert_ne!(preview_text, initial_text);
+        assert!(output.shapes.iter().any(|s| matches!(&s.shape, Shape::Text(t) if t.galley.job.text == preview_text)));
+        assert!(view.actions.is_empty() && view.drag.is_none());
+        chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(end, false)], Some(0.3));
+        assert!(matches!(view.actions.as_slice(), [ChartAction::Move { handle: Handle::Tp(1), .. }]));
+    }
+
+    #[test]
+    fn label_capture_works_over_indicator_hover_labels() {
+        let series = Series::new(vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }], 2);
+        let handle = Handle::Tp(1);
+        let levels = [Level { price: 100.0, color: Color32::GREEN, label: "editable".into(), dashed: true, handle: Some(handle), side: None, value: None }];
+        let map_levels = [MapLevel { study: "levels", price: 100.0, from: 0, color: Color32::RED, width: 1.0,
+            dashed: false, text: "Indicator label covering the trade label".into(), details: "details".into() }];
+        for offset in [-7.0, 0.0, 7.0] {
+            let mut data = trade_data(&series, &levels, CursorMode::Arrow);
+            data.map_levels = &map_levels;
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(1.25);
+            let mut view = ChartView::default();
+            chart_frame_at(&ctx, &mut view, &data, vec![], Some(0.0));
+            let y = (600.0 - TIME_AXIS_H) * (1.0 - ((100.0 - view.y_lo) / (view.y_hi - view.y_lo)) as f32);
+            let start = Pos2::new(100.0, y + offset);
+            chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(start)], Some(0.05));
+            chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(start, true)], Some(0.1));
+            chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(start, false)], Some(0.12));
+            chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(start, true)], Some(0.2));
+            assert_eq!(view.label_grab, Some((handle, start)), "offset {offset}");
+            let end = start + Vec2::new(0.0, -40.0);
+            chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(end), pointer_button(end, false)], Some(0.25));
+            assert!(matches!(view.actions.as_slice(), [ChartAction::Move { handle: Handle::Tp(1), .. }]));
+        }
+    }
+
+    #[test]
+    fn label_second_press_is_captured_when_first_release_arrives_in_the_same_frame() {
+        let series = Series::new(vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }], 2);
+        let handle = Handle::Tp(1);
+        let levels = [Level { price: 100.0, color: Color32::GREEN, label: "editable".into(), dashed: true, handle: Some(handle), side: None, value: None }];
+        let data = trade_data(&series, &levels, CursorMode::Arrow);
+        let ctx = egui::Context::default();
+        let mut view = ChartView::default();
+        chart_frame_at(&ctx, &mut view, &data, vec![], Some(0.0));
+        let y = (600.0 - TIME_AXIS_H) * (1.0 - ((100.0 - view.y_lo) / (view.y_hi - view.y_lo)) as f32);
+        let start = Pos2::new(100.0, y);
+        chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(start), pointer_button(start, true)], Some(0.1));
+        chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(start, false), pointer_button(start, true)], Some(0.2));
+        assert_eq!(view.label_grab, Some((handle, start)));
+        let end = start + Vec2::new(0.0, -40.0);
+        chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(end)], Some(0.25));
+        assert_eq!(view.level_drag.map(|(h, _)| h), Some(handle));
+        chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(end, false), egui::Event::PointerGone], Some(0.3));
+        assert!(matches!(view.actions.as_slice(), [ChartAction::Move { handle: Handle::Tp(1), .. }]));
+    }
+
+    #[test]
+    fn label_drag_completes_when_second_press_motion_and_release_are_batched() {
+        let series = Series::new(vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }], 2);
+        let handle = Handle::Tp(1);
+        let levels = [Level { price: 100.0, color: Color32::GREEN, label: "editable".into(), dashed: true, handle: Some(handle), side: None, value: None }];
+        let data = trade_data(&series, &levels, CursorMode::Arrow);
+        let ctx = egui::Context::default();
+        let mut view = ChartView::default();
+        chart_frame_at(&ctx, &mut view, &data, vec![], Some(0.0));
+        let y = (600.0 - TIME_AXIS_H) * (1.0 - ((100.0 - view.y_lo) / (view.y_hi - view.y_lo)) as f32);
+        let start = Pos2::new(100.0, y);
+        let end = start + Vec2::new(0.0, -40.0);
+        chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(start), pointer_button(start, true)], Some(0.1));
+        chart_frame_at(&ctx, &mut view, &data, vec![
+            pointer_button(start, false), pointer_button(start, true),
+            egui::Event::PointerMoved(end), pointer_button(end, false), egui::Event::PointerGone,
+        ], Some(0.2));
+        assert!(matches!(view.actions.as_slice(), [ChartAction::Move { handle: Handle::Tp(1), .. }]));
+        assert!(view.level_drag.is_none() && view.label_grab.is_none());
+        chart_frame_at(&ctx, &mut view, &data, vec![], Some(0.3));
+        assert!(view.actions.is_empty());
+    }
+
+    #[test]
+    fn double_press_label_drags_orders_stops_and_targets_without_alt() {
+        let series = Series::new(vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }], 2);
+        for cursor in CursorMode::ALL {
+            for (handle, on_axis) in [Handle::Order(2), Handle::Sl(1), Handle::Tp(1), Handle::Position(2)]
+                .into_iter().flat_map(|h| [false, true].map(|axis| (h, axis)))
+            {
+                let levels = [
+                    Level { price: 99.5, color: Color32::GREEN, label: "position".into(), dashed: false, handle: Some(Handle::Position(1)), side: Some(Side::Buy), value: None },
+                    Level { price: 100.0, color: Color32::RED, label: "editable".into(), dashed: true, handle: Some(handle), side: matches!(handle, Handle::Position(_)).then_some(Side::Buy), value: None },
+                ];
+                let data = trade_data(&series, &levels, cursor);
+                let ctx = egui::Context::default();
+                let mut view = ChartView::default();
+                let output = chart_frame_at(&ctx, &mut view, &data, vec![], Some(0.0));
+                let mut start = output.shapes.iter().find_map(|s| match &s.shape {
+                    Shape::Text(t) if t.galley.job.text == "editable" => Some(t.pos + t.galley.size() / 2.0 + Vec2::new(0.0, 7.0)),
+                    _ => None,
+                }).unwrap(); // Near the tag's bottom edge, beyond the thin line's hit area.
+                if on_axis {
+                    start.x = 800.0 - PRICE_AXIS_W / 2.0;
+                }
+                let right = view.right;
+                let range = (view.y_lo, view.y_hi);
+                chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(start), pointer_button(start, true)], Some(0.1));
+                chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(start, false)], Some(0.12));
+                assert!(view.actions.is_empty());
+                // Both clicks can land anywhere within the same label, even several pixels apart.
+                let second = start + Vec2::new(10.0, 0.0);
+                chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(second), pointer_button(second, true)], Some(0.2));
+                assert!(view.level_drag.is_none(), "a second press alone must not modify the order");
+                assert_eq!(view.label_grab, Some((handle, second)));
+                // Holding the second press past the double-click delay must keep the captured label.
+                chart_frame_at(&ctx, &mut view, &data, vec![], Some(1.0));
+                assert!(view.level_drag.is_none() && view.drag.is_none() && !view.measuring);
+                let end = second + Vec2::new(if on_axis { 0.0 } else { 120.0 }, -60.0);
+                chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(end)], Some(1.1));
+                assert_eq!(view.level_drag.map(|(h, _)| h), Some(handle));
+                assert!(view.actions.is_empty(), "changes wait for release");
+                assert!(!view.measuring && view.drag.is_none());
+                chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(end, false)], Some(1.2));
+                let expected = range.0 + ((600.0 - TIME_AXIS_H - end.y) / (600.0 - TIME_AXIS_H)) as f64 * (range.1 - range.0);
+                assert_eq!(view.actions, vec![ChartAction::Move { handle, price: expected }]);
+                assert_eq!(view.right, right);
+                assert_eq!((view.y_lo, view.y_hi), range);
+                assert!(view.level_drag.is_none() && view.label_grab.is_none());
+                chart_frame_at(&ctx, &mut view, &data, vec![], Some(1.3));
+                assert!(view.actions.is_empty(), "release emits just one move");
+            }
+        }
+    }
+
+    #[test]
+    fn label_drag_works_without_click_history_after_a_long_hold_and_with_small_motion() {
+        let series = Series::new(vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }], 2);
+        let handle = Handle::Tp(1);
+        let levels = [Level { price: 100.0, color: Color32::GREEN, label: "editable".into(), dashed: true, handle: Some(handle), side: None, value: None }];
+        for cursor in CursorMode::ALL {
+            for x in [100.0, 800.0 - PRICE_AXIS_W / 2.0] {
+                let data = trade_data(&series, &levels, cursor);
+                let ctx = egui::Context::default();
+                let mut view = ChartView::default();
+                chart_frame_at(&ctx, &mut view, &data, vec![], Some(0.0));
+                let y = (600.0 - TIME_AXIS_H) * (1.0 - ((100.0 - view.y_lo) / (view.y_hi - view.y_lo)) as f32);
+                let start = Pos2::new(x, y);
+                chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(start), pointer_button(start, true)], Some(0.1));
+                assert_eq!(view.label_grab, Some((handle, start)));
+                chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(start + Vec2::new(8.0, 1.0))], Some(1.5));
+                assert!(view.actions.is_empty() && view.level_drag.is_none() && view.drag.is_none() && !view.measuring);
+                let end = start + Vec2::new(0.0, -5.0);
+                chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(end)], Some(1.6));
+                assert_eq!(view.level_drag.map(|(h, _)| h), Some(handle));
+                assert!(view.actions.is_empty() && view.drag.is_none() && !view.measuring);
+                chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(end, false)], Some(1.7));
+                assert!(matches!(view.actions.as_slice(), [ChartAction::Move { handle: Handle::Tp(1), .. }]));
+            }
+        }
+    }
+
+    #[test]
+    fn outside_or_locked_labels_keep_the_selected_chart_gesture() {
+        let series = Series::new(vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }], 2);
+        for (x, editable) in [(300.0, true), (80.0, false)] {
+            for cursor in [CursorMode::Hand, CursorMode::Cross] {
+                let levels = [Level { price: 100.0, color: Color32::RED, label: "editable".into(), dashed: true, handle: editable.then_some(Handle::Order(1)), side: None, value: None }];
+                let ctx = egui::Context::default();
+                let mut view = ChartView::default();
+                let data = trade_data(&series, &levels, cursor);
+                chart_frame_at(&ctx, &mut view, &data, vec![], Some(0.0));
+                let y = (600.0 - TIME_AXIS_H) * (1.0 - ((100.0 - view.y_lo) / (view.y_hi - view.y_lo)) as f32);
+                let start = Pos2::new(x, y);
+                chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(start), pointer_button(start, true)], Some(0.1));
+                assert!(view.label_grab.is_none());
+                let end = start + Vec2::new(80.0, -60.0);
+                chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(end)], Some(0.2));
+                assert!(view.level_drag.is_none());
+                assert!(view.drag == Some(Zone::Plot) || view.measuring);
+                chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(end, false)], Some(0.3));
+                assert!(view.actions.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn double_click_without_drag_keeps_order_and_alt_and_remove_still_work() {
+        let series = Series::new(vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }], 2);
+        let handle = Handle::Order(1);
+        let levels = [Level { price: 100.0, color: Color32::RED, label: "editable".into(), dashed: true, handle: Some(handle), side: None, value: None }];
+        let data = trade_data(&series, &levels, CursorMode::Hand);
+        let ctx = egui::Context::default();
+        let mut view = ChartView::default();
+        chart_frame_at(&ctx, &mut view, &data, vec![], Some(0.0));
+        let y = (600.0 - TIME_AXIS_H) * (1.0 - ((100.0 - view.y_lo) / (view.y_hi - view.y_lo)) as f32);
+        let label = Pos2::new(80.0, y);
+        for time in [0.1, 0.2] {
+            chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(label), pointer_button(label, true)], Some(time));
+            chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(label, false)], Some(time + 0.02));
+            assert!(view.actions.is_empty() && view.level_drag.is_none());
+        }
+        let alt = egui::Modifiers { alt: true, ..Default::default() };
+        let alt_button = |pos, pressed| egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Primary, pressed, modifiers: alt,
+        };
+        let start = Pos2::new(300.0, y);
+        let end = start + Vec2::new(0.0, -60.0);
+        chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::ModifiersChanged(alt), egui::Event::PointerMoved(start), alt_button(start, true)], Some(1.0));
+        chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::ModifiersChanged(alt), egui::Event::PointerMoved(end)], Some(1.05));
+        assert_eq!(view.level_drag.map(|(h, _)| h), Some(handle));
+        chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::ModifiersChanged(alt), alt_button(end, false)], Some(1.1));
+        assert!(matches!(view.actions.as_slice(), [ChartAction::Move { handle: Handle::Order(1), .. }]));
+        let x = Pos2::new(REMOVE_X + REMOVE_W / 2.0, y);
+        chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::ModifiersChanged(Default::default()), egui::Event::PointerMoved(x), pointer_button(x, true)], Some(2.0));
+        assert!(view.label_grab.is_none());
+        chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(x, false)], Some(2.05));
+        assert_eq!(view.actions, vec![ChartAction::Remove { handle }]);
+        chart_frame_at(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(label), pointer_button(label, true)], Some(3.0));
+        chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(label, false)], Some(3.02));
+        chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(label, true)], Some(3.1));
+        chart_frame_at(&ctx, &mut view, &data, vec![], Some(4.0));
+        assert!(view.level_drag.is_none() && view.drag.is_none());
+        chart_frame_at(&ctx, &mut view, &data, vec![pointer_button(label, false)], Some(4.1));
+        assert!(view.actions.is_empty(), "holding the second click without motion must not change the order");
     }
 
     #[test]
@@ -1701,7 +2076,7 @@ mod tests {
                 series, symbol: "X", tf: Timeframe::M5, server_now: None,
                 levels: &[], overlays: &[], map_levels: &[], pane: None, pane_open: false,
                 layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor: CursorMode::Hand,
-                tick: 0.0, order_volume: "1", bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &[],
+                tick: 0.0, order_volume: "1", bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &[], active: true,
             }
         }
         let ctx = egui::Context::default();
@@ -1736,15 +2111,16 @@ mod tests {
         let series = Series::new((0..120).map(|i| Bar {
             time: i * 300, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0,
         }).collect(), 2);
-        for cursor in CursorMode::ALL {
+        for (cursor, auto_scale) in CursorMode::ALL.into_iter().flat_map(|c| [true, false].map(|a| (c, a))) {
             let data = ChartData {
                 series: &series, symbol: "X", tf: Timeframe::M5, server_now: None,
                 levels: &[], overlays: &[], map_levels: &[], pane: None, pane_open: false,
                 layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor, tick: 0.0,
-                order_volume: "1", bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &[],
+                order_volume: "1", bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &[], active: true,
             };
             let ctx = egui::Context::default();
             let mut view = ChartView::default();
+            view.set_auto_scale(auto_scale);
             chart_frame(&ctx, &mut view, &data, vec![]);
             let right = view.right;
             let range = (view.y_lo, view.y_hi);
@@ -1757,7 +2133,12 @@ mod tests {
             match cursor {
                 CursorMode::Hand => {
                     assert_eq!(view.right, right - 10.0);
-                    assert_ne!((view.y_lo, view.y_hi), range);
+                    assert_eq!(view.auto_scale(), auto_scale);
+                    if auto_scale {
+                        assert_eq!((view.y_lo, view.y_hi), range, "automatic scale stays on while panning");
+                    } else {
+                        assert_ne!((view.y_lo, view.y_hi), range, "manual mode permits vertical panning");
+                    }
                     assert!(view.measurement.is_none());
                 }
                 CursorMode::Arrow => {
@@ -1783,6 +2164,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn refit_recovers_offscreen_candles_without_changing_date_or_zoom() {
+        let series = Series::new((0..400).map(|i| Bar {
+            time: i * 300, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0,
+        }).collect(), 2);
+        let data = ChartData {
+            series: &series, symbol: "X", tf: Timeframe::M5, server_now: None,
+            levels: &[], overlays: &[], map_levels: &[], pane: None, pane_open: false,
+            layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor: CursorMode::Hand,
+            tick: 0.0, order_volume: "1", bracket: None, volume: None, marks: None,
+            shading: None, ribbon: None, legend: &[], studies: &[], active: true,
+        };
+        let ctx = egui::Context::default();
+        let mut view = ChartView::default();
+        chart_frame(&ctx, &mut view, &data, vec![]);
+        view.right = 150.0;
+        view.set_auto_scale(false);
+        (view.y_lo, view.y_hi) = (1000.0, 2000.0);
+        chart_frame(&ctx, &mut view, &data, vec![]);
+        assert_eq!((view.y_lo, view.y_hi), (1000.0, 2000.0));
+        let zoom = view.bar_px;
+        view.measuring = true;
+        view.set_auto_scale(true);
+        chart_frame(&ctx, &mut view, &data, vec![]);
+        assert!(view.y_lo < 99.0 && view.y_hi > 101.0);
+        assert!(view.auto_scale() && !view.measuring);
+        assert_eq!(view.right, 150.0);
+        assert_eq!(view.bar_px, zoom);
+        view.set_auto_scale(false);
+        view.reset();
+        chart_frame(&ctx, &mut view, &data, vec![]);
+        assert!(!view.auto_scale(), "reset preserves the manual preference");
+        assert!(view.y_lo < 99.0 && view.y_hi > 101.0, "a new chart starts fitted even in manual mode");
     }
 
     #[test]
@@ -1841,13 +2257,13 @@ mod tests {
     #[test]
     fn locked_chart_shows_quote_without_order_preview_and_trades_draw_on_top() {
         let series = Series::new(vec![Bar { time: 0, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }], 2);
-        let levels = [Level { price: 100.0, color: Color32::RED, label: "operation".into(), dashed: false, handle: None, side: None }];
+        let levels = [Level { price: 100.0, color: Color32::RED, label: "operation".into(), dashed: false, handle: None, side: None, value: None }];
         let data = ChartData {
             series: &series, symbol: "X", tf: Timeframe::M5, server_now: Some(1.0),
             levels: &levels, overlays: &[], map_levels: &[], pane: None, pane_open: false,
             layers: &[Layer::Levels, Layer::Indicators, Layer::Price, Layer::Trades],
             quote: Some((100.0, 100.25)), can_trade: false, cursor: CursorMode::Hand, tick: 0.25, order_volume: "1",
-            bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &[],
+            bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &[], active: true,
         };
         let ctx = egui::Context::default();
         let mut view = ChartView::default();
@@ -1889,7 +2305,7 @@ mod tests {
             series: &series, symbol: "X", tf: Timeframe::M5, server_now: None,
             levels: &[], overlays: &overlays, map_levels: &map_levels, pane: Some(&pane), pane_open: true,
             layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor: CursorMode::Hand, tick: 0.0, order_volume: "1",
-            bracket: None, volume: None, marks: None, legend: &[], studies: &[], ribbon: None,
+            bracket: None, volume: None, marks: None, legend: &[], studies: &[], active: true, ribbon: None,
             shading: Some(Shading { study: "tint", classes: &classes, palette: &[Color32::GREEN] }),
         };
         let plot = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 400.0));
@@ -1915,7 +2331,7 @@ mod tests {
             series: &series, symbol: "X", tf: Timeframe::M5, server_now: None,
             levels: &[], overlays: &overlays, map_levels: &[], pane: None, pane_open: false,
             layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor: CursorMode::Hand, tick: 0.0, order_volume: "1",
-            bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &studies,
+            bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &studies, active: true,
         };
         let ctx = egui::Context::default();
         let mut view = ChartView { bar_px: 6.0, ..Default::default() };

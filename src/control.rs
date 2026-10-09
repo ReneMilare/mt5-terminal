@@ -8,7 +8,7 @@
 
 use crate::chart::Layer;
 use crate::model::Timeframe;
-use crate::settings::{self, Settings};
+use crate::settings::{self, Grid, Settings};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -22,6 +22,9 @@ Comandos (mt5-terminal ctl <comando>):
   state                    estado em JSON: símbolo, timeframe, conta, camadas, posições...
   symbol <SÍMBOLO>         troca o símbolo do gráfico
   tf <M1|M5|M15|M30|H1|H4|D1|W1>
+                           (symbol e tf valem para o gráfico ativo)
+  layout <1|2|2v|3|4|6>    gráficos lado a lado: 1, 2 lado a lado, 2 empilhados, 3, 2×2, 3×2
+  chart <N>                ativa o gráfico N (1 = o primeiro, da esquerda para a direita)
   studies <on|off>         liga/desliga os indicadores (grava no config.toml)
   layers <a,b,c,d>         ordem de desenho, de trás para a frente: levels, indicators, trades, price
   front <camada>           põe uma camada na frente (grava no config.toml)
@@ -34,6 +37,9 @@ Comandos (mt5-terminal ctl <comando>):
 pub enum Action {
     Symbol(String),
     Timeframe(Timeframe),
+    Layout(Grid),
+    /// Activate chart N (1-based).
+    Chart(usize),
     Reload,
 }
 
@@ -105,6 +111,14 @@ fn execute(line: &str, shared: &Shared, tx: &Sender<Action>) -> String {
             Some(tf) => queue(Action::Timeframe(tf), tf.label().to_string()),
             None => "erro: timeframe? use M1, M5, M15, M30, H1, H4, D1 ou W1".into(),
         },
+        "layout" => match Grid::from_key(arg) {
+            Some(g) => queue(Action::Layout(g), g.label().to_string()),
+            None => "erro: layout? use 1, 2, 2v, 3, 4 ou 6".into(),
+        },
+        "chart" => match arg.parse::<usize>() {
+            Ok(n) if n >= 1 => queue(Action::Chart(n), format!("gráfico {n} ativo")),
+            _ => "erro: chart <N>, a partir de 1".into(),
+        },
         "reload" => queue(Action::Reload, "relendo o config.toml".into()),
         "studies" if arg == "on" || arg == "off" => match current() {
             Ok(s) => save(&s.chart.layers, arg == "on", format!("studies {arg}")),
@@ -174,6 +188,12 @@ mod tests {
         assert!(execute("tf X9", &shared, &tx).starts_with("erro"));
         assert!(execute("symbol UsaInd", &shared, &tx).starts_with("ok: UsaInd"));
         assert_eq!(rx.try_recv(), Ok(Action::Symbol("UsaInd".into())));
+        assert!(execute("layout 2v", &shared, &tx).starts_with("ok: 2 empilhados"));
+        assert_eq!(rx.try_recv(), Ok(Action::Layout(Grid::TwoStacked)));
+        assert!(execute("layout 5", &shared, &tx).starts_with("erro"));
+        assert!(execute("chart 2", &shared, &tx).starts_with("ok"));
+        assert_eq!(rx.try_recv(), Ok(Action::Chart(2)));
+        assert!(execute("chart 0", &shared, &tx).starts_with("erro"));
         assert!(execute("layers price,levels", &shared, &tx).starts_with("erro"));
         assert!(execute("front nada", &shared, &tx).starts_with("erro"));
         assert!(execute("comprar 1", &shared, &tx).starts_with("erro"), "ctl never trades");

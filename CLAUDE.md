@@ -18,15 +18,26 @@ por isso antes de qualquer outra coisa.
   O(1), um candle novo processa só esse candle, histórico antigo inserido na frente só desloca os
   valores (`trend::shift_front`), sem recalcular. A passada completa roda uma vez, depois do
   aquecimento. Arquivos externos só são relidos quando mudam, nunca no tick.
+- **Abertura:** a porta do EA abre antes da janela (`main`), o EA reconecta a cada 250 ms e monta o JSON
+  do histórico com espaço reservado (`StringReserve`): conectado com o gráfico em ~0,4 s, indicadores
+  aquecidos em ~1 s. Concatenar sem reservar custava ~1,2 s por bloco de 5000 candles.
 - **Desenho:** só os candles visíveis, malhas únicas (`Mesh`) para candles e volume, linhas por trechos
   de mesma cor. Meça antes de afirmar ganho: `cargo test --release -- --ignored --nocapture bench`;
   no app, `MT5_TERMINAL_PERF=1` imprime a cada 5 s quadros/s, ticks/s e o tempo de cada quadro.
 
 ## Gráfico
 
+- Gráficos lado a lado (`panes.rs`, menu **Gráficos**, `chart.layout`: 1, 2, 2v, 3, 4, 6): cada `Pane` tem
+  símbolo, timeframe, vista, indicadores, data e delta próprios; store, loader, fonte e boleta são
+  compartilhados. O ativo (sob o mouse parado por `HOVER_FOCUS`, ou o último clicado; borda em destaque) segue a barra superior, a data, a boleta e
+  os atalhos; só ele opera pelo gráfico, os outros mostram posições/ordens sem arrastar. Escolhas gravadas
+  em `chart.symbol`/`timeframe` (o primeiro) e `chart.charts` (os outros, "SÍMBOLO TF").
 - O rodapé mostra o volume, ou o que o preset puser no lugar (`Studies::volume`, ex.: delta de volume).
   O delta por candle: exato do EA para os fechados (comando `delta`, em fatias), ao vivo pelos ticks
-  para o em formação (`model::Deltas`), e o EA é chamado de novo a cada candle que fecha.
+  para o em formação (`model::Deltas`), e o EA é chamado de novo a cada candle que fecha. O EA atende um
+  pedido por vez: o app pede primeiro os candles da tela de cada gráfico (`panes::DELTA_FIRST`) e depois o
+  resto (`skip`). Cada leitura de ticks no EA custa ~120 ms fixos e segura ticks e ordens: blocos grandes
+  (24 h, `DELTA_CHUNK_MSC`), poucas leituras.
 - Marcas por candle sobre os candles (`Studies::marks`, ex.: POC): traço que acompanha a largura do
   candle (`chart::Marks`). A POC vem junto com o delta (`row` do preset no comando `delta`).
 
@@ -60,7 +71,15 @@ por isso antes de qualquer outra coisa.
   preço do tick, e o clique a posiciona (limite do lado favorável, stop do outro); arrastar a linha de
   uma posição **com Alt segurado** para o lado do ganho põe o alvo, para o da perda o stop (compra:
   cima = alvo); com Alt, linhas de ordem, stop e alvo se arrastam; sem Alt, o modo Mão move o gráfico
-  e o modo Cruz mede. O × da linha nos modos Seta/Mão (ou Delete com o mouse sobre ela) fecha a posição (o
+  e o modo Cruz mede. Dois cliques na etiqueta à esquerda ou no preço à direita, mantendo o segundo
+  pressionado, permitem arrastar sem Alt em qualquer cursor (ordem/stop/alvo ou posição para criar
+  stop/alvo). A etiqueta também aceita clicar e arrastar diretamente, sem depender da cadência de
+  duplo clique; só soltar após arrastar aplica o preço.
+  Etiquetas de stop/alvo mostram o resultado bruto estimado na moeda da conta (distância em ticks ×
+  volume × valor do tick de ganho/perda enviado pelo MT5) e a variação percentual desde a entrada,
+  com sinal conforme compra/venda, também durante o arraste; sem comissões e swap. Valores do tick
+  são atualizados a cada 5 s pelo EA (v8). Sem valor disponível, mostra `—`, nunca um zero inventado.
+  O × da linha nos modos Seta/Mão (ou Delete com o mouse sobre ela) fecha a posição (o
   stop e o alvo dela vão junto), cancela a ordem ou tira só o stop/alvo; botão direito abre um menu.
   Tudo sob as mesmas travas da boleta.
 

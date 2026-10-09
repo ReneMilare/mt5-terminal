@@ -1,6 +1,6 @@
 ---
 name: configure-mt5-terminal
-description: Configure or inspect the MT5 Terminal app (chart symbol/timeframe, symbol list, drawing layers, indicators on/off, colors, first history chunk, MetaTrader 5 auto-start and command). Use when the user asks to change how MT5 Terminal looks or behaves, or asks what it is showing. Not for sending orders.
+description: Configure or inspect the MT5 Terminal app (chart symbol/timeframe, charts side by side, symbol list, drawing layers, indicators on/off, colors, first history chunk, MetaTrader 5 auto-start and command). Use when the user asks to change how MT5 Terminal looks or behaves, or asks what it is showing. Not for sending orders.
 ---
 
 # Configurar o MT5 Terminal
@@ -19,7 +19,9 @@ salvar. Para ações imediatas existe `mt5-terminal ctl`, como o `hyprctl` do Hy
 | Chave | Valores |
 |---|---|
 | `chart.symbols` | lista de símbolos do seletor (nomes exatos do MT5) |
-| `chart.symbol`, `chart.timeframe` | ao abrir; timeframes `M1 M5 M15 M30 H1 H4 D1 W1` |
+| `chart.symbol`, `chart.timeframe` | do primeiro gráfico (o app grava a escolha); timeframes `M1 M5 M15 M30 H1 H4 D1 W1` |
+| `chart.layout` | gráficos lado a lado: `"1"`, `"2"` (lado a lado), `"2v"` (empilhados), `"3"`, `"4"` (2×2), `"6"` (3×2) |
+| `chart.charts` | os outros gráficos, em ordem: `["UsaInd M5", "UsaRus M15"]`; faltando, o próximo símbolo de `chart.symbols` |
 | `chart.layers` | as 4 camadas, de trás para a frente: `levels`, `indicators`, `trades`, `price` (padrão: preço na frente) |
 | `chart.show_studies` | indicadores do preset |
 | `chart.first_bars` | candles do primeiro bloco (100–20000); mais antigos vêm conforme o usuário volta no tempo |
@@ -45,9 +47,10 @@ workspace escondido, aplica quando ela voltar a aparecer.
 
 Respondem na hora mesmo com a janela escondida. Saída `erro: ...` (código 1) em falha.
 
-- `ctl state` — JSON: símbolo, timeframe, fonte, conexão, conta (`kind`: `demo`/`real`), candles,
+- `ctl state` — JSON: símbolo e timeframe do gráfico ativo, `layout`, `active_chart`, `charts` (cada gráfico), fonte, conexão, conta (`kind`: `demo`/`real`), candles,
   camadas, indicadores, Fibonacci (âncoras/níveis por timeframe), posições, ordens, status. Use para conferir o efeito de uma mudança.
-- `ctl symbol <S>`, `ctl tf <TF>` — muda o gráfico agora (não altera o padrão do arquivo).
+- `ctl symbol <S>`, `ctl tf <TF>` — muda o gráfico ativo agora (o app grava a escolha no arquivo).
+- `ctl layout <1|2|2v|3|4|6>` — quantos gráficos lado a lado; `ctl chart <N>` — ativa o gráfico N (1 = primeiro).
 - `ctl studies on|off`, `ctl front <camada>`, `ctl layers a,b,c,d` — gravam no config.toml.
 - `ctl reload` — relê o arquivo. `ctl config` — caminho. `ctl help` — lista.
 

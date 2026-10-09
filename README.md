@@ -42,6 +42,12 @@ TCP and relays quotes, history, positions and orders.
   stop and target, and a click places it (limit on the favorable side, stop on the other).
 - With **Alt** held, drag a position line toward profit (target) or loss (stop), or move orders,
   stops and targets already placed.
+- To move an order, stop or target without **Alt**, click its label twice, keep the second click
+  held and drag. You can also press and drag the label directly, without double-click timing.
+  Both the left label and the price label on the right work, in all three cursor modes.
+  The same gesture on a position creates a stop or target. Release to apply the new price.
+- Stop and target labels show the estimated gross result in the account currency and the signed
+  price change from entry (%), including while dragging. Hover for the calculation details.
 - The **×** on each line (or Delete while hovering it) closes the position along with its stop and
   target, cancels the order, or removes just the stop/target. Right-click opens an order menu.
 - Shortcuts: **Ctrl+Shift+B/S** buy/sell, **Z** flatten, **R** reverse, **E** breakeven, even with
@@ -53,10 +59,19 @@ Every action goes through the same safety locks as the ticket.
 
 ![Crosshair mode measuring +1.02% over 36 bars](docs/img/measure.png)
 
+- Several symbols at once: the **Gráficos** menu shows 1, 2 side by side, 2 stacked, 3 side by side,
+  2×2 or 3×2 charts, each with its own symbol, timeframe, indicators and date. The chart under the
+  resting pointer, or the last one clicked (accent border), is the active one: the symbol/timeframe bar, the date bar, the ticket and the
+  shortcuts apply to it; the others show their positions and orders read-only. Saved as
+  `chart.layout` and `chart.charts`.
 - Bid and ask lines with axis labels, spread in the legend, bar countdown.
 - Three cursor modes: **Arrow**, **Hand** (drag the chart) and **Crosshair** (click and drag to
   measure the % change and the distance in bars; Esc clears).
 - Keyboard: ←/→ pan, +/− zoom.
+- **Escala automática** (above the chart) fits the price axis to the visible candles and stays on
+  while panning. **Reenquadrar** recovers the candles and enables auto-scale, keeping the visible
+  date and horizontal zoom. Dragging or scrolling the price axis switches to manual scale;
+  double-clicking it restores auto-scale. The choice is saved as `chart.auto_scale` (default: true).
 - Jump to a day: enter **DD/MM/YYYY** (or **YYYY-MM-DD**) in **Ir para data** and press Enter or
   **Ir**. Older history loads in chunks; dates use the chart's server time. A day without candles
   shows the next available session (or the nearest end of the available history). **Hoje** cancels
@@ -87,6 +102,7 @@ Measured on a laptop (Hyprland, 1920×1080) with 20,000 bars and 20 ticks per se
 | Tick without a new bar | ~180 ns in the indicators |
 | New bar | ~0.25 ms |
 | Full load of 20,000 bars | ~60 ms, off the UI thread |
+| Startup to a live chart | ~0.4 s (MT5 already open); indicators warm in ~1 s |
 
 Check it on your machine with `cargo test --release -- --ignored --nocapture bench`, or run the app
 with `MT5_TERMINAL_PERF=1` to print frames/s, ticks/s and frame times every 5 s.
@@ -131,7 +147,7 @@ protocol and details: [docs/protocol.md](docs/protocol.md).
 
 `~/.config/mt5-terminal/config.toml`, commented and applied live on save (`mt5-terminal config init`
 creates it, `config check` validates it). While the app is open, `mt5-terminal ctl help` lists
-commands such as `ctl symbol UsaInd`, `ctl tf H1`, `ctl front price` and `ctl state`. AI agents
+commands such as `ctl symbol UsaInd`, `ctl tf H1`, `ctl layout 4`, `ctl front price` and `ctl state`. AI agents
 (Claude Code) get a skill in `.claude/skills/configure-mt5-terminal`. None of this sends orders.
 
 ## Indicators

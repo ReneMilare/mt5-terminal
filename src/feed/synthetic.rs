@@ -400,6 +400,8 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Feed {
                                 symbol: symbol.clone(),
                                 digits: 2,
                                 tick_size: 0.01,
+                                tick_value_profit: 0.01 * CONTRACT,
+                                tick_value_loss: 0.01 * CONTRACT,
                                 vol_min: VOL_MIN,
                                 vol_max: VOL_MAX,
                                 vol_step: VOL_STEP,

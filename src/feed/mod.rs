@@ -48,13 +48,16 @@ pub enum Command {
     Flatten { id: u64, symbol: String },
     /// Buy/sell volume (tick rule) of the last `count` closed bars, newest first, in several
     /// [`Message::Delta`] batches computed by the EA in slices. With `row` > 0 each bar also brings
-    /// its POC: the middle of the `row`-high price level with the most counted ticks.
+    /// its POC: the middle of the `row`-high price level with the most counted ticks. `skip`: leave out
+    /// the newest closed bars (already asked for; v9).
     Delta {
         symbol: String,
         tf: Timeframe,
         count: u32,
         #[serde(default, skip_serializing_if = "is_zero")]
         row: f64,
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        skip: u32,
     },
     /// Change a pending order (`price`, `sl`, `tp`) or a position's stops (`sl`, `tp`; `price` ignored).
     /// All values absolute; 0 removes a stop.
@@ -169,6 +172,11 @@ pub enum Message {
         symbol: String,
         digits: u32,
         tick_size: f64,
+        /// Account currency per tick per lot, separately for a gain and a loss (v8).
+        #[serde(default)]
+        tick_value_profit: f64,
+        #[serde(default)]
+        tick_value_loss: f64,
         vol_min: f64,
         vol_max: f64,
         vol_step: f64,
@@ -229,12 +237,16 @@ pub enum Message {
     },
 }
 
-/// Protocol version this app speaks; older EAs lack the daily result (v7), POC per bar (v6), the delta (v5), modify + netting flag (v4), paged history (v3),
+/// Protocol version this app speaks; older EAs lack the delta's `skip` (v9), monetary tick values (v8), the daily result (v7), POC per bar (v6), the delta (v5), modify + netting flag (v4), paged history (v3),
 /// the history queue and probes (v2).
-pub const BRIDGE_VERSION: u32 = 7;
+pub const BRIDGE_VERSION: u32 = 9;
 
 fn is_zero(v: &f64) -> bool {
     *v == 0.0
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 fn first_version() -> u32 {
@@ -287,6 +299,11 @@ mod tests {
         assert_eq!(serde_json::to_string(&cmd).unwrap(), r#"{"t":"history","symbol":"UsaTec","tf":"M5","count":10}"#);
         let cmd = Command::History { symbol: "X".into(), tf: Timeframe::M1, count: 2, before: Some(600) };
         assert_eq!(serde_json::to_string(&cmd).unwrap(), r#"{"t":"history","symbol":"X","tf":"M1","count":2,"before":600}"#);
+        // the EA reads `skip` as 0 when absent: the first part of a delta goes out as before v9
+        let cmd = Command::Delta { symbol: "X".into(), tf: Timeframe::M5, count: 300, row: 2.5, skip: 0 };
+        assert_eq!(serde_json::to_string(&cmd).unwrap(), r#"{"t":"delta","symbol":"X","tf":"M5","count":300,"row":2.5}"#);
+        let cmd = Command::Delta { symbol: "X".into(), tf: Timeframe::M5, count: 2700, row: 2.5, skip: 300 };
+        assert_eq!(serde_json::to_string(&cmd).unwrap(), r#"{"t":"delta","symbol":"X","tf":"M5","count":2700,"row":2.5,"skip":300}"#);
         let m: Message =
             serde_json::from_str(r#"{"t":"tick","symbol":"UsaTec","time_msc":1,"bid":2.5,"ask":2.75}"#).unwrap();
         assert_eq!(m, Message::Tick { symbol: "UsaTec".into(), time_msc: 1, bid: 2.5, ask: 2.75, volume: 0.0 });
@@ -322,5 +339,15 @@ mod tests {
         assert_eq!((positions[0].side, positions[0].sl, positions[0].profit), (Side::Sell, 0.0, -3.25));
         let m: Message = serde_json::from_str(r#"{"t":"trade_result","id":7,"ok":false,"retcode":10019,"msg":"sem margem"}"#).unwrap();
         assert!(matches!(m, Message::TradeResult { id: 7, ok: false, retcode: 10019, .. }));
+    }
+
+    #[test]
+    fn symbol_tick_values_decode_and_old_bridges_leave_them_unavailable() {
+        let legacy = r#"{"t":"symbol","symbol":"X","digits":2,"tick_size":0.25,"vol_min":0.1,"vol_max":10,"vol_step":0.1}"#;
+        let Message::Symbol { tick_value_profit, tick_value_loss, .. } = serde_json::from_str(legacy).unwrap() else { panic!() };
+        assert_eq!((tick_value_profit, tick_value_loss), (0.0, 0.0));
+        let json = legacy.replace("\"tick_size\":0.25", "\"tick_size\":0.25,\"tick_value_profit\":0.5,\"tick_value_loss\":0.75");
+        let Message::Symbol { tick_value_profit, tick_value_loss, .. } = serde_json::from_str(&json).unwrap() else { panic!() };
+        assert_eq!((tick_value_profit, tick_value_loss), (0.5, 0.75));
     }
 }

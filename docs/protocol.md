@@ -17,7 +17,7 @@ horários são do servidor do MT5 (barras em segundos, ticks em milissegundos).
 | `close` | `id`, `ticket` | Fecha a posição inteira a mercado |
 | `cancel` | `id`, `ticket` | Remove a ordem pendente |
 | `flatten` | `id`, `symbol` | Cancela as ordens e fecha as posições do símbolo, de qualquer origem |
-| `delta` | `symbol`, `tf`, `count`, `row` (opcional) | Compras e vendas por candle (regra do tick sobre o preço médio, recomeçando a cada candle) dos `count` candles fechados mais recentes, do mais novo ao mais antigo, em lotes `delta`; com `row` > 0, também a POC de cada candle (meio do nível de altura `row` com mais ticks contados); uma leitura de ticks (até 6 h) por ciclo, para não atrasar ordens e ticks |
+| `delta` | `symbol`, `tf`, `count`, `row` (opcional), `skip` (opcional, v9) | Compras e vendas por candle (regra do tick sobre o preço médio, recomeçando a cada candle) dos `count` candles fechados mais recentes, depois dos `skip` mais novos, do mais novo ao mais antigo, em lotes `delta`; com `row` > 0, também a POC de cada candle (meio do nível de altura `row` com mais ticks contados); uma leitura de ticks (até 24 h) por ciclo, para não atrasar ordens e ticks. Pedidos ficam numa fila: o app pede primeiro os candles da tela de cada gráfico e depois o resto |
 | `probe` | `id`, `symbol`, `tf`, `indicator`, `buffer`, `count` | Diagnóstico: últimos valores de um buffer do indicador (nome curto começando com `indicator`) no gráfico do MT5 desse símbolo/timeframe |
 | `objects` | `id`, `symbol`, `tf`, `prefix` | Diagnóstico: texto e preço dos objetos do gráfico cujo nome começa com `prefix` |
 
@@ -29,7 +29,7 @@ horários são do servidor do MT5 (barras em segundos, ticks em milissegundos).
 | `t` | Campos |
 |---|---|
 | `hello` | `symbol`, `digits`, `server`, `login`, `account` (`demo`/`contest`/`real`), `version` (protocolo; o app avisa se for mais antigo) |
-| `symbol` | `symbol`, `digits`, `tick_size`, `vol_min`, `vol_max`, `vol_step` |
+| `symbol` | `symbol`, `digits`, `tick_size`, `tick_value_profit`, `tick_value_loss` (v8), `vol_min`, `vol_max`, `vol_step` |
 | `bars` | `symbol`, `tf`, `digits`, `bars: [[time, open, high, low, close, tick_volume], ..]` |
 | `tick` | `symbol`, `time_msc`, `bid`, `ask`, `volume` (volume real; 1 por tick em CFD) |
 | `account` | `balance`, `equity`, `margin_free`, `currency`, `trade_allowed` |
@@ -44,6 +44,12 @@ horários são do servidor do MT5 (barras em segundos, ticks em milissegundos).
 
 `account`, `positions` e `orders` são retratos completos, enviados na conexão e depois só quando mudam
 (verificado a cada 100 ms e a cada transação). `profit` inclui swap.
+
+`tick_value_profit` e `tick_value_loss` são os valores do tick por lote na moeda da conta,
+informados pelo MT5. `symbol` acompanha o histórico recente e é atualizado a cada 5 s para
+acompanhar conversões cambiais. O app estima o resultado bruto dos stops/alvos como distância em
+ticks × volume × valor do tick (ganho/perda); não inclui comissões nem swap. Ausência de valor do
+tick aparece como `—`, preservando o percentual sobre o preço de entrada.
 
 `daily_result` é da conta inteira: soma lucro/prejuízo, comissões (inclusive de entrada ou lançadas
 separadamente), swap e taxas dos negócios de hoje; depósitos e saques ficam fora. `floating` é o resultado

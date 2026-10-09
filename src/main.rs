@@ -11,6 +11,7 @@ mod history;
 mod launcher;
 mod model;
 mod navigation;
+mod panes;
 #[cfg(has_preset)]
 #[path = "../preset/mod.rs"]
 mod preset;
@@ -19,12 +20,13 @@ mod studies;
 mod theme;
 mod trading;
 
-use chart::{ChartData, ChartView, CursorMode, Layer};
+use chart::{ChartData, CursorMode, Layer};
 use eframe::egui::{self, Align, Color32, Layout, RichText};
 use feed::{Command, Event, Feed, Message};
 use history::{Loader, Need};
 use model::{Series, Store, Timeframe};
-use settings::Settings;
+use panes::{DeltaAsked, Pane};
+use settings::{Grid, Settings};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use studies::Studies;
@@ -35,6 +37,9 @@ use trading::Trading;
 const CONFIG_EVERY: Duration = Duration::from_millis(500);
 /// Re-fetch the last bars of every series this often, to correct what the ticks built.
 const RESYNC_EVERY: Duration = Duration::from_secs(60);
+/// The pointer resting this long over a chart makes it the active one (just passing over it, on the
+/// way to the ticket, doesn't switch the ticket's symbol).
+const HOVER_FOCUS: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Source {
@@ -59,10 +64,12 @@ struct App {
     source: Source,
     connected: bool,
     account: Option<Account>,
-    symbol: String,
-    tf: Timeframe,
+    /// Charts side by side (`chart.layout`), and the one the top bar, the ticket and the shortcuts use.
+    panes: Vec<Pane>,
+    active: usize,
+    /// Chart under the resting pointer and since when (it becomes active after `HOVER_FOCUS`).
+    hover_since: Option<(usize, Instant)>,
     store: Store,
-    studies: Studies,
     settings: Settings,
     /// Modification time of config.toml when last read, and when it was last checked.
     config_mtime: Option<std::time::SystemTime>,
@@ -71,14 +78,9 @@ struct App {
     control: Option<(crossbeam_channel::Receiver<control::Action>, std::sync::Arc<control::Shared>)>,
     last_state: Instant,
     loader: Loader,
-    /// Last (bid, tick time in ms) of every symbol.
-    quotes: HashMap<String, (f64, i64)>,
+    /// Last (bid, ask, tick time in ms) of every symbol.
+    quotes: HashMap<String, (f64, f64, i64)>,
     last_resync: Instant,
-    /// Newest chart bar seen, to finalize the delta of the bar that closed.
-    delta_last_bar: i64,
-    /// Closed bars of delta the studies want, and whether they were asked for (needs the POC row).
-    delta_want: u32,
-    delta_requested: bool,
     #[cfg(has_preset)]
     verify: Option<preset::verify::Verify>,
     /// MetaTrader 5 was started by the app and hasn't connected yet.
@@ -97,24 +99,27 @@ struct App {
     confirm_switch: Option<settings::Account>,
     /// Account switch in progress: its reports, and the login it goes to.
     switching: Option<(crossbeam_channel::Receiver<String>, i64)>,
-    view: ChartView,
-    navigation: navigation::DateNavigation,
-    /// Last tick server time (ms) and when it arrived, to extrapolate server time.
+    /// Newest tick server time (ms, any symbol) and when it arrived, to extrapolate server time.
     last_tick: Option<(i64, Instant)>,
     status: Option<String>,
     trading: Trading,
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext, args: Args) -> Self {
+    fn new(cc: &eframe::CreationContext, mut args: Args) -> Self {
         let (settings, config_status) = match Settings::load() {
             Ok((s, warnings)) => (s, (!warnings.is_empty()).then(|| format!("config: {}", warnings.join("; ")))),
             Err(e) => (Settings::default(), Some(format!("config.toml inválido, usando o padrão: {e}"))),
         };
         let pal = settings.palette();
         theme::apply(&cc.egui_ctx, &pal);
-        let symbol = args.symbol.clone().unwrap_or_else(|| settings.chart.symbol.clone());
-        let tf = args.tf.unwrap_or(settings.chart.timeframe);
+        let mut panes: Vec<Pane> = Vec::new();
+        for i in 0..settings.chart.layout.count() {
+            let open: Vec<&str> = panes.iter().map(|p| p.symbol.as_str()).collect();
+            let (symbol, tf) = panes::configured(&settings, i, &open);
+            let (symbol, tf) = if i == 0 { (args.symbol.clone().unwrap_or(symbol), args.tf.unwrap_or(tf)) } else { (symbol, tf) };
+            panes.push(Pane::new(symbol, tf, &settings));
+        }
         let control = if args.primary {
             let (ctx, shared) = (cc.egui_ctx.clone(), control::Shared::new());
             control::serve(shared.clone(), move || ctx.request_repaint()).ok().map(|rx| (rx, shared))
@@ -122,12 +127,12 @@ impl App {
             None
         };
         let ctx = cc.egui_ctx.clone();
-        let (bridge, bridge_error) = {
-            let ctx = ctx.clone();
-            match feed::bridge::spawn(feed::bridge::DEFAULT_ADDR, move || ctx.request_repaint()) {
-                Ok(f) => (Some(f), None),
-                Err(e) => (None, Some(format!("não abriu {}: {e}", feed::bridge::DEFAULT_ADDR))),
-            }
+        // the port opened before the window (`main`): from now on its events wake the frames
+        let _ = args.wake.set(ctx.clone());
+        let (bridge, bridge_error) = match args.bridge.take() {
+            Some(Ok(f)) => (Some(f), None),
+            Some(Err(e)) => (None, Some(e)),
+            None => (None, None),
         };
         let mut app = Self {
             perf: std::env::var_os("MT5_TERMINAL_PERF").map(|_| Perf::default()),
@@ -139,9 +144,9 @@ impl App {
             source: Source::Mt5,
             connected: false,
             account: None,
-            studies: Studies::new(&symbol, tf, &settings.fibonacci, &settings.studies),
-            symbol,
-            tf,
+            panes,
+            active: 0,
+            hover_since: None,
             store: Store::default(),
             settings,
             config_mtime: settings::mtime(),
@@ -151,9 +156,6 @@ impl App {
             loader: Loader::default(),
             quotes: HashMap::new(),
             last_resync: Instant::now(),
-            delta_last_bar: 0,
-            delta_want: 0,
-            delta_requested: false,
             #[cfg(has_preset)]
             verify: args.verify.map(preset::verify::Verify::new),
             mt5_starting: false,
@@ -166,8 +168,6 @@ impl App {
             fib_levels: String::new(),
             confirm_switch: None,
             switching: None,
-            view: ChartView::default(),
-            navigation: navigation::DateNavigation::default(),
             last_tick: None,
             status: config_status,
             trading: Trading::default(),
@@ -204,60 +204,94 @@ impl App {
         self.store.clear();
         self.loader.clear();
         self.quotes.clear();
-        self.clear_chart();
+        self.clear_charts();
         // a source that is already connected won't say so again
         if source == Source::Mt5 && self.bridge.is_some() {
-            self.request();
+            self.request(0..self.panes.len());
         }
     }
 
-    fn clear_chart(&mut self) {
-        self.view.reset();
-        self.navigation.clear();
-        self.delta_last_bar = 0;
+    fn clear_charts(&mut self) {
+        for p in &mut self.panes {
+            p.clear(&self.settings);
+        }
         self.last_tick = None;
-        self.studies = Studies::new(&self.symbol, self.tf, &self.settings.fibonacci, &self.settings.studies);
+    }
+
+    fn pane(&self) -> &Pane {
+        &self.panes[self.active]
+    }
+
+    /// Symbol of the active chart (the ticket's).
+    fn symbol(&self) -> &str {
+        &self.pane().symbol
     }
 
     fn series(&self) -> Option<&Series> {
-        self.store.get(&self.symbol, self.tf)
+        self.store.get(&self.pane().symbol, self.pane().tf)
     }
 
-    /// Ask the active source for the first chunk of what the chart and its indicators need.
-    fn request(&mut self) {
-        let needs = self.studies.needs();
-        let mut symbols = vec![self.symbol.clone()];
-        symbols.extend(needs.symbols.into_iter().filter(|s| *s != self.symbol));
+    fn quote(&self, symbol: &str) -> Option<(f64, f64)> {
+        self.quotes.get(symbol).map(|&(bid, ask, _)| (bid, ask))
+    }
+
+    /// Ask the active source for the first chunk of what every chart and its indicators need (the
+    /// loader skips what is loaded or loading). `renew`: charts whose delta is asked for again.
+    fn request(&mut self, renew: std::ops::Range<usize>) {
+        let mut symbols: Vec<String> = Vec::new();
+        let mut add = |s: &str| {
+            if !symbols.iter().any(|x| x == s) {
+                symbols.push(s.to_string());
+            }
+        };
+        for p in &self.panes {
+            add(&p.symbol);
+        }
+        let mut first = Vec::new();
+        for (i, p) in self.panes.iter_mut().enumerate() {
+            let needs = p.studies.needs();
+            for s in &needs.symbols {
+                add(s);
+            }
+            // the delta goes out once the studies know the POC level height (it needs the bars)
+            if renew.contains(&i) {
+                p.delta_want = needs.delta_bars;
+                p.delta = DeltaAsked::Nothing;
+            }
+            first.extend(needs.first);
+        }
         let mut cmds = vec![Command::Subscribe { symbols }];
-        // the delta goes out once the studies know the POC level height (it needs the bars)
-        self.delta_want = needs.delta_bars;
-        self.delta_requested = false;
         let (store, loader) = (&self.store, &mut self.loader);
-        cmds.extend(loader.first(store, &self.symbol, self.tf, self.settings.chart.first_bars));
-        for (symbol, tf, count) in needs.first {
+        for p in &self.panes {
+            cmds.extend(loader.first(store, &p.symbol, p.tf, self.settings.chart.first_bars));
+        }
+        for (symbol, tf, count) in first {
             cmds.extend(loader.first(store, &symbol, tf, count));
         }
         self.send_all(cmds);
     }
 
-    /// Older chunks for whatever still needs them: the view reaching the oldest bar, the indicators'
+    /// Older chunks for whatever still needs them: a view reaching the oldest bar, the indicators'
     /// warm-up and extra series. At most one request in flight per series.
     fn load_more(&mut self) {
         if !self.connected {
             return;
         }
-        let (store, loader, sym, tf) = (&self.store, &mut self.loader, self.symbol.as_str(), self.tf);
+        let (store, loader) = (&self.store, &mut self.loader);
         let mut cmds = Vec::new();
-        if let Some(time) = self.navigation.target {
-            cmds.extend(loader.older(store, sym, tf, Need::At { time }));
-        }
-        if self.view.wants_older {
-            cmds.extend(loader.older(store, sym, tf, Need::More));
-        }
-        if self.settings.chart.show_studies {
-            cmds.extend(loader.older(store, sym, tf, Studies::warmup(tf)));
-            for (symbol, tf, need) in self.studies.needs().older {
-                cmds.extend(loader.older(store, &symbol, tf, need));
+        for p in &self.panes {
+            let (sym, tf) = (p.symbol.as_str(), p.tf);
+            if let Some(time) = p.navigation.target {
+                cmds.extend(loader.older(store, sym, tf, Need::At { time }));
+            }
+            if p.view.wants_older {
+                cmds.extend(loader.older(store, sym, tf, Need::More));
+            }
+            if self.settings.chart.show_studies {
+                cmds.extend(loader.older(store, sym, tf, Studies::warmup(tf)));
+                for (symbol, tf, need) in p.studies.needs().older {
+                    cmds.extend(loader.older(store, &symbol, tf, need));
+                }
             }
         }
         self.send_all(cmds);
@@ -266,18 +300,19 @@ impl App {
     /// A chart bar closed: ask the EA for its exact delta (the live one is built from the streamed
     /// ticks, which may skip ticks of the same millisecond).
     fn finalize_delta(&mut self) {
-        let Some(last) = self.series().and_then(|s| s.bars.last()).map(|b| b.time) else { return;
-        };
-        if last == self.delta_last_bar {
-            return;
+        let mut cmds = Vec::new();
+        for p in &mut self.panes {
+            let Some(last) = self.store.bars(&p.symbol, p.tf).last().map(|b| b.time) else { continue };
+            if last == p.delta_last_bar {
+                continue;
+            }
+            let first = p.delta_last_bar == 0;
+            p.delta_last_bar = last;
+            if !first && self.connected && let Some(d) = self.store.deltas(&p.symbol, p.tf) {
+                cmds.push(Command::Delta { symbol: p.symbol.clone(), tf: p.tf, count: 2, row: d.row, skip: 0 });
+            }
         }
-        let first = self.delta_last_bar == 0;
-        self.delta_last_bar = last;
-        if !first && self.connected && self.store.deltas(&self.symbol, self.tf).is_some() {
-            let row = self.store.deltas(&self.symbol, self.tf).map(|d| d.row).unwrap_or(0.0);
-            let cmd = Command::Delta { symbol: self.symbol.clone(), tf: self.tf, count: 2, row };
-            self.send_all(vec![cmd]);
-        }
+        self.send_all(cmds);
     }
 
     /// Re-fetch the last bars of every series (corrects volumes and closes built from ticks).
@@ -293,19 +328,113 @@ impl App {
         }
     }
 
+    /// New symbol and/or timeframe for the active chart.
     fn select(&mut self, symbol: Option<&str>, tf: Option<Timeframe>) {
-        let symbol = symbol.unwrap_or(&self.symbol).to_string();
-        let tf = tf.unwrap_or(self.tf);
-        if symbol == self.symbol && tf == self.tf {
+        self.select_in(self.active, symbol, tf, true);
+    }
+
+    /// New symbol and/or timeframe for chart `i`; `save`: write it to config.toml (a choice in the app).
+    fn select_in(&mut self, i: usize, symbol: Option<&str>, tf: Option<Timeframe>, save: bool) {
+        let p = &self.panes[i];
+        let symbol = symbol.unwrap_or(&p.symbol).to_string();
+        let tf = tf.unwrap_or(p.tf);
+        if symbol == p.symbol && tf == p.tf {
             return;
         }
-        if symbol != self.symbol {
-            self.trading.symbol_changed();
+        let symbol_changed = symbol != p.symbol;
+        let p = &mut self.panes[i];
+        p.symbol = symbol;
+        p.tf = tf;
+        p.clear(&self.settings);
+        if symbol_changed && i == self.active {
+            let symbol = self.symbol().to_string();
+            self.trading.symbol_changed(&symbol, self.quote(&symbol));
         }
-        self.symbol = symbol;
-        self.tf = tf;
-        self.clear_chart();
-        self.request();
+        self.request(i..i + 1);
+        if save {
+            self.save_charts();
+        }
+    }
+
+    /// Make chart `i` the one the top bar, the date bar, the ticket and the shortcuts use.
+    fn activate(&mut self, i: usize) {
+        if i == self.active || i >= self.panes.len() {
+            return;
+        }
+        let before = self.symbol().to_string();
+        self.active = i;
+        if self.symbol() != before {
+            let symbol = self.symbol().to_string();
+            self.trading.symbol_changed(&symbol, self.quote(&symbol));
+        }
+        // the scale checkbox shows this chart's mode; not a choice to write down
+        self.settings.chart.auto_scale = self.pane().view.auto_scale();
+    }
+
+    /// Show `grid`: charts beyond it close (their symbols stay in `chart.charts` for later), new ones
+    /// open with what the config says.
+    fn set_layout(&mut self, grid: Grid, save: bool) {
+        let n = grid.count();
+        let before = self.panes.len();
+        if n < before {
+            // remember the closing charts' symbols before they go
+            self.settings.chart.charts = self.charts_entries();
+            if self.active >= n {
+                self.activate(0);
+            }
+            self.panes.truncate(n);
+        }
+        for i in before..n {
+            let open: Vec<&str> = self.panes.iter().map(|p| p.symbol.as_str()).collect();
+            let (symbol, tf) = panes::configured(&self.settings, i, &open);
+            self.panes.push(Pane::new(symbol, tf, &self.settings));
+        }
+        self.settings.chart.layout = grid;
+        if n > before && self.connected {
+            self.request(before..n);
+        }
+        if save {
+            self.save_charts();
+        }
+    }
+
+    /// `chart.charts` as the open charts set it, keeping entries of charts not open now.
+    fn charts_entries(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.panes.iter().skip(1).map(Pane::entry).collect();
+        out.extend(self.settings.chart.charts.iter().skip(out.len()).cloned());
+        out
+    }
+
+    fn save_charts(&mut self) {
+        let charts = self.charts_entries();
+        let first = &self.panes[0];
+        self.settings.chart.symbol = first.symbol.clone();
+        self.settings.chart.timeframe = first.tf;
+        if !self.settings.chart.symbols.contains(&first.symbol) {
+            self.settings.chart.symbols.insert(0, first.symbol.clone());
+        }
+        self.settings.chart.charts = charts;
+        let c = &self.settings.chart;
+        if let Err(e) = settings::save_charts(c.layout, &c.symbol, c.timeframe, &c.charts) {
+            self.status = Some(format!("não gravou os gráficos no config.toml: {e}"));
+        }
+        self.config_mtime = settings::mtime();
+    }
+
+    /// The charts the config asks for, where they differ from what is open (config edited outside).
+    fn apply_charts(&mut self) {
+        let grid = self.settings.chart.layout;
+        if grid.count() != self.panes.len() {
+            self.set_layout(grid, false);
+        }
+        for i in 0..self.panes.len() {
+            // a chart without an entry keeps what it shows
+            if i > 0 && self.settings.chart.charts.get(i - 1).is_none() {
+                continue;
+            }
+            let (symbol, tf) = panes::configured(&self.settings, i, &[]);
+            self.select_in(i, Some(&symbol), Some(tf), false);
+        }
     }
 
     fn pump(&mut self) {
@@ -330,10 +459,12 @@ impl App {
                     self.status = None;
                     self.store.clear();
                     self.loader.clear();
-                    let target_date = self.navigation.target;
-                    self.clear_chart();
-                    self.navigation.target = target_date;
-                    self.request();
+                    let dates: Vec<Option<i64>> = self.panes.iter().map(|p| p.navigation.target).collect();
+                    self.clear_charts();
+                    for (p, date) in self.panes.iter_mut().zip(dates) {
+                        p.navigation.target = date;
+                    }
+                    self.request(0..self.panes.len());
                     #[cfg(has_preset)]
                     if let Some(v) = self.verify.as_mut() {
                         v.restart();
@@ -344,7 +475,7 @@ impl App {
                     self.account = None;
                     self.trading.reset();
                 }
-                Event::Message(msg) if self.trading.on_message(&msg, &self.symbol) => {
+                Event::Message(msg) if self.trading.on_message(&msg, &self.panes[self.active].symbol) => {
                     // a tick also feeds the chart
                     if let Message::Tick { symbol, time_msc, bid, ask, volume } = msg {
                         self.on_tick(&symbol, time_msc, bid, ask, volume);
@@ -374,13 +505,15 @@ impl App {
                 Event::Message(Message::Bars { symbol, tf, digits, before, bars }) => {
                     self.loader.on_bars(&symbol, tf, before, bars.is_empty());
                     self.store.put(&symbol, tf, Message::decode_bars(&bars), digits);
-                    self.studies.data_arrived();
+                    for p in &mut self.panes {
+                        p.studies.data_arrived();
+                    }
                 }
                 #[cfg(has_preset)]
                 Event::Message(msg @ (Message::Probe { .. } | Message::Objects { .. })) => {
                     if let Some(v) = self.verify.as_mut() {
-                        let bars = self.store.bars(&self.symbol, self.tf);
-                        v.on_message(&msg, bars, &self.studies);
+                        let p = &self.panes[self.active];
+                        v.on_message(&msg, self.store.bars(&p.symbol, p.tf), &p.studies);
                     }
                 }
                 Event::Message(Message::Tick { symbol, time_msc, bid, ask, volume }) => {
@@ -401,13 +534,14 @@ impl App {
     fn on_tick(&mut self, symbol: &str, time_msc: i64, bid: f64, ask: f64, volume: f64) {
         self.store.tick(symbol, time_msc.div_euclid(1000), bid, volume);
         self.store.tick_quote(symbol, time_msc, bid, ask);
-        self.quotes.insert(symbol.to_string(), (bid, time_msc));
-        if symbol == self.symbol {
+        self.quotes.insert(symbol.to_string(), (bid, ask, time_msc));
+        // server time is the same for every symbol: keep the newest
+        if self.last_tick.is_none_or(|(last, _)| time_msc >= last) {
             self.last_tick = Some((time_msc, Instant::now()));
         }
     }
 
-    /// Server time now, extrapolated from the last tick of the chart symbol.
+    /// Server time now, extrapolated from the newest tick.
     fn server_now(&self) -> Option<f64> {
         self.last_tick.map(|(ms, at)| ms as f64 / 1000.0 + at.elapsed().as_secs_f64())
     }
@@ -430,26 +564,33 @@ impl App {
             ui.label(RichText::new("MT5 Terminal").strong().color(self.pal.text).size(15.0));
             ui.separator();
 
+            if self.panes.len() > 1 {
+                ui.label(RichText::new(format!("Gráfico {}", self.active + 1)).color(self.pal.accent).size(12.0))
+                    .on_hover_text("Símbolo e timeframe abaixo valem para o gráfico ativo (borda em destaque). Pare o mouse sobre outro gráfico (ou clique nele) para ativá-lo.");
+            }
+            let (current, current_tf) = (self.pane().symbol.clone(), self.pane().tf);
             let mut symbol: Option<String> = None;
             egui::ComboBox::from_id_salt("symbol")
-                .selected_text(RichText::new(&self.symbol).strong())
+                .selected_text(RichText::new(&current).strong())
                 .width(96.0)
                 .show_ui(ui, |ui| {
                     for s in &self.settings.chart.symbols {
-                        if ui.selectable_label(self.symbol == *s, s).clicked() {
+                        if ui.selectable_label(current == *s, s).clicked() {
                             symbol = Some(s.clone());
                         }
                     }
                 });
             let mut tf = None;
             for t in Timeframe::ALL {
-                if ui.selectable_label(self.tf == t, t.label()).clicked() {
+                if ui.selectable_label(current_tf == t, t.label()).clicked() {
                     tf = Some(t);
                 }
             }
             if symbol.is_some() || tf.is_some() {
                 self.select(symbol.as_deref(), tf);
             }
+            ui.separator();
+            ui.menu_button("Gráficos", |ui| self.layout_menu(ui)).response.on_hover_text("Ver vários ativos ao mesmo tempo, lado a lado");
 
             ui.separator();
             let mut cursor = self.settings.chart.cursor;
@@ -494,35 +635,82 @@ impl App {
             .and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
             .map(|t| t.date_naive())
             .unwrap_or_else(|| chrono::Local::now().date_naive());
+        let (pal, connected) = (&self.pal, self.connected);
+        let pane = &mut self.panes[self.active];
         ui.horizontal_centered(|ui| {
             ui.label("Ir para data:");
-            let input = ui.add(egui::TextEdit::singleline(&mut self.navigation.input)
+            let input = ui.add(egui::TextEdit::singleline(&mut pane.navigation.input)
                 .id_salt("chart-date").hint_text("DD/MM/AAAA").desired_width(100.0).char_limit(10))
                 .on_hover_text("Data do gráfico (horário do servidor). Aceita DD/MM/AAAA ou AAAA-MM-DD.");
             let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.button("Ir").clicked() || enter {
-                self.navigation.request(today);
+                pane.navigation.request(today);
             }
             if ui.button("Hoje").on_hover_text("Voltar aos candles mais recentes e acompanhar o mercado").clicked() {
-                self.navigation.clear();
-                self.navigation.input = today.format("%d/%m/%Y").to_string();
-                self.view.reset();
+                pane.navigation.clear();
+                pane.navigation.input = today.format("%d/%m/%Y").to_string();
+                pane.view.reset();
+                pane.view.set_auto_scale(true);
             }
-            if let Some(time) = self.navigation.target {
+            ui.separator();
+            let mut auto_scale = pane.view.auto_scale();
+            if ui.checkbox(&mut auto_scale, "Escala automática")
+                .on_hover_text("Ajusta os preços aos candles visíveis, inclusive ao mover o gráfico. Ajustar o eixo de preços manualmente desliga.")
+                .changed()
+            {
+                pane.view.set_auto_scale(auto_scale);
+            }
+            if ui.button("Reenquadrar").on_hover_text("Recuperar os candles e ligar a escala automática, mantendo a data e o zoom horizontal").clicked() {
+                pane.view.set_auto_scale(true);
+            }
+            if let Some(time) = pane.navigation.target {
                 let date = chrono::DateTime::from_timestamp(time, 0).unwrap();
-                let text = if self.connected {
+                let text = if connected {
                     format!("Buscando {}…", date.format("%d/%m/%Y"))
                 } else {
                     "Aguardando conexão para buscar a data…".into()
                 };
-                ui.label(RichText::new(text).color(self.pal.warn).size(12.0));
-            } else if let Some(message) = &self.navigation.message {
-                ui.label(RichText::new(message).color(self.pal.text_dim).size(12.0));
+                ui.label(RichText::new(text).color(pal.warn).size(12.0));
+            } else if let Some(message) = &pane.navigation.message {
+                ui.label(RichText::new(message).color(pal.text_dim).size(12.0));
             }
         });
-        if let Some(time) = self.navigation.resolve(&self.store, &self.loader, &self.symbol, self.tf) {
-            self.view.go_to(time);
+        if let Some(time) = pane.navigation.resolve(&self.store, &self.loader, &pane.symbol, pane.tf) {
+            pane.view.go_to(time);
             ui.ctx().request_repaint();
+        }
+        self.sync_auto_scale();
+    }
+
+    fn sync_auto_scale(&mut self) {
+        let enabled = self.pane().view.auto_scale();
+        if enabled != self.settings.chart.auto_scale {
+            self.settings.chart.auto_scale = enabled;
+            if let Err(e) = settings::save_auto_scale(enabled) {
+                self.status = Some(format!("não gravou a escala automática no config.toml: {e}"));
+            }
+            self.config_mtime = settings::mtime();
+        }
+    }
+
+    /// How many charts, side by side.
+    fn layout_menu(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Gráficos lado a lado").color(self.pal.text_dim).size(11.5));
+        let current = self.settings.chart.layout;
+        let mut chosen = None;
+        for grid in Grid::ALL {
+            ui.horizontal(|ui| {
+                grid_icon(ui, grid, if grid == current { self.pal.accent } else { self.pal.text_dim });
+                if ui.selectable_label(grid == current, grid.label()).clicked() {
+                    chosen = Some(grid);
+                    ui.close();
+                }
+            });
+        }
+        ui.separator();
+        ui.label(RichText::new("Cada gráfico tem símbolo, timeframe e indicadores próprios.\nPare o mouse sobre um gráfico (ou clique) para ativá-lo:\na barra de cima e a boleta passam a valer para ele.").color(self.pal.text_dim).size(11.5));
+        if let Some(grid) = chosen.filter(|g| *g != current) {
+            self.set_layout(grid, true);
         }
     }
 
@@ -577,11 +765,27 @@ impl App {
                 self.pal = s.palette();
                 theme::apply(&self.wake, &self.pal);
                 self.trading.set_presets(&s.presets, &s.ticket.preset);
-                let fibonacci_changed = self.studies.configure_fibonacci(&s.fibonacci);
-                let (studies_changed, invalid) = self.studies.configure(&s.studies);
+                let (mut changed, mut invalid) = (false, Vec::new());
+                for p in &mut self.panes {
+                    changed |= p.studies.configure_fibonacci(&s.fibonacci);
+                    let (studies_changed, bad) = p.studies.configure(&s.studies);
+                    changed |= studies_changed;
+                    invalid = bad;
+                }
+                // the file changed the scale mode: every chart follows
+                if s.chart.auto_scale != self.settings.chart.auto_scale {
+                    for p in &mut self.panes {
+                        p.view.set_auto_scale(s.chart.auto_scale);
+                    }
+                }
+                let c = (&s.chart, &self.settings.chart);
+                let charts_changed = c.0.layout != c.1.layout || c.0.charts != c.1.charts || c.0.symbol != c.1.symbol || c.0.timeframe != c.1.timeframe;
                 self.settings = s;
-                if (fibonacci_changed || studies_changed) && self.connected {
-                    self.request();
+                if charts_changed {
+                    self.apply_charts();
+                }
+                if changed && self.connected {
+                    self.request(0..self.panes.len());
                 }
                 let warnings: Vec<String> = warnings.into_iter().chain(invalid).collect();
                 self.status = (!warnings.is_empty()).then(|| format!("config: {}", warnings.join("; ")));
@@ -601,6 +805,8 @@ impl App {
             match action {
                 control::Action::Symbol(s) => self.select(Some(&s), None),
                 control::Action::Timeframe(tf) => self.select(None, Some(tf)),
+                control::Action::Layout(grid) => self.set_layout(grid, true),
+                control::Action::Chart(n) => self.activate(n.saturating_sub(1)),
                 control::Action::Reload => {
                     self.config_mtime = settings::mtime();
                     self.reload_config();
@@ -616,9 +822,22 @@ impl App {
     }
 
     fn state_json(&self) -> String {
+        let pane = self.pane();
         serde_json::json!({
-            "symbol": self.symbol,
-            "timeframe": self.tf.label(),
+            "symbol": pane.symbol,
+            "timeframe": pane.tf.label(),
+            "layout": self.settings.chart.layout.key(),
+            "active_chart": self.active + 1,
+            "charts": self.panes.iter().map(|p| serde_json::json!({
+                "symbol": p.symbol, "timeframe": p.tf.label(), "candles": self.store.bars(&p.symbol, p.tf).len(),
+                // volume delta: wanted by the indicators, asked of the EA, closed bars received
+                "delta": {
+                    "want": p.delta_want, "asked": p.delta.key(), "row": p.studies.delta_row(),
+                    "bars": self.store.deltas(&p.symbol, p.tf).map(|d| d.bars.len()),
+                    // newest closed bar with an exact delta (behind the chart: MT5 lacks the ticks)
+                    "last": self.store.deltas(&p.symbol, p.tf).and_then(|d| d.bars.keys().next_back().copied()),
+                },
+            })).collect::<Vec<_>>(),
             "source": if self.source == Source::Mt5 { "mt5" } else { "synthetic" },
             "connected": self.connected,
             "account": self.account.as_ref().map(|a| serde_json::json!({"server": a.server, "login": a.login, "kind": a.kind})),
@@ -626,8 +845,9 @@ impl App {
             "studies": self.settings.chart.show_studies,
             "layers": self.settings.chart.layers.iter().map(|l| l.key()).collect::<Vec<_>>(),
             "cursor": self.settings.chart.cursor.key(),
-            "fibonacci": self.studies.fibonacci_state(),
-            "indicators": self.studies.params().iter().map(|p| p.state()).collect::<Vec<_>>(),
+            "auto_scale": pane.view.auto_scale(),
+            "fibonacci": pane.studies.fibonacci_state(),
+            "indicators": pane.studies.params().iter().map(|p| p.state()).collect::<Vec<_>>(),
             "positions": self.trading.positions.len(),
             "orders": self.trading.orders.len(),
             "daily_result": self.trading.day_result.as_ref().map(|day| serde_json::json!({
@@ -713,7 +933,7 @@ impl App {
     /// `[studies.<key>]` once the mouse is released (not on every step of a drag).
     fn study_window(&mut self, ctx: &egui::Context) {
         let Some(key) = self.study_open else { return };
-        let Some(mut params) = self.studies.params().iter().find(|p| p.key == key).cloned() else {
+        let Some(mut params) = self.pane().studies.params().iter().find(|p| p.key == key).cloned() else {
             self.study_open = None;
             return;
         };
@@ -777,9 +997,13 @@ impl App {
             } else {
                 self.settings.studies.insert(key.to_string(), toml::Value::Table(table));
             }
-            let (needs_changed, _) = self.studies.configure(&self.settings.studies);
+            // the options are the same in every chart
+            let mut needs_changed = false;
+            for p in &mut self.panes {
+                needs_changed |= p.studies.configure(&self.settings.studies).0;
+            }
             if needs_changed && self.connected {
-                self.request();
+                self.request(0..self.panes.len());
             }
             self.study_dirty = true;
         }
@@ -787,8 +1011,12 @@ impl App {
             match settings::check_fibonacci(&fib) {
                 Ok(()) => {
                     self.fib_levels = fib_text(&fib.levels);
-                    if self.studies.configure_fibonacci(&fib) && self.connected {
-                        self.request();
+                    let mut needs_changed = false;
+                    for p in &mut self.panes {
+                        needs_changed |= p.studies.configure_fibonacci(&fib);
+                    }
+                    if needs_changed && self.connected {
+                        self.request(0..self.panes.len());
                     }
                     self.settings.fibonacci = fib;
                     if let Err(e) = settings::save_fibonacci(&self.settings.fibonacci) {
@@ -1104,7 +1332,8 @@ impl App {
             .frame(egui::Frame::new().fill(self.pal.panel_bg).inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ui, |ui| self.status_bar(ui));
         let (connected, real) = (self.connected, self.is_real());
-        let keys = self.trading.shortcuts(ui.ctx(), &self.symbol, connected, real);
+        let symbol = self.symbol().to_string();
+        let keys = self.trading.shortcuts(ui.ctx(), &symbol, connected, real);
         self.send_all(keys);
         // the ticket, or a thin strip when collapsed
         let open = self.settings.ui.ticket_open;
@@ -1122,7 +1351,7 @@ impl App {
                             toggle = ui.small_button("»").on_hover_text("Recolher a boleta").clicked();
                         });
                     });
-                    self.trading.ticket_ui(ui, &self.pal, &self.symbol, connected, real)
+                    self.trading.ticket_ui(ui, &self.pal, &symbol, connected, real)
                 } else {
                     ui.add_space(6.0);
                     toggle = ui.add_sized([22.0, 40.0], egui::Button::new("«")).on_hover_text("Abrir a boleta").clicked();
@@ -1151,30 +1380,56 @@ impl App {
             .show(ui, |ui| self.navigation_bar(ui));
         self.resync();
         let server_now = self.server_now();
-        if !self.studies.is_for(&self.symbol, self.tf) {
-            self.studies = Studies::new(&self.symbol, self.tf, &self.settings.fibonacci, &self.settings.studies);
+        for p in &mut self.panes {
+            if !p.studies.is_for(&p.symbol, p.tf) {
+                p.studies = Studies::new(&p.symbol, p.tf, &self.settings.fibonacci, &self.settings.studies);
+            }
         }
         self.load_more();
         self.finalize_delta();
-        let warm = self.loader.ready(&self.store, &self.symbol, self.tf, Studies::warmup(self.tf));
-        if self.settings.chart.show_studies {
-            let digits = self.series().map(|s| s.digits).unwrap_or(2);
-            let quotes = &self.quotes;
-            let tick = self.trading.tick_size();
-            self.studies.update(&self.store, digits, tick, warm, server_now.map(|t| t as i64), |s| quotes.get(s).map(|&(bid, ms)| (bid, ms.div_euclid(1000))),
-            );
+        let mut warm = vec![false; self.panes.len()];
+        let mut cmds = Vec::new();
+        for (i, p) in self.panes.iter_mut().enumerate() {
+            warm[i] = self.loader.ready(&self.store, &p.symbol, p.tf, Studies::warmup(p.tf));
+            if self.settings.chart.show_studies {
+                let digits = self.store.get(&p.symbol, p.tf).map(|s| s.digits).unwrap_or(2);
+                let quotes = &self.quotes;
+                let tick = self.trading.tick_size_of(&p.symbol);
+                p.studies.update(&self.store, digits, tick, warm[i], server_now.map(|t| t as i64), |s| quotes.get(s).map(|&(bid, _, ms)| (bid, ms.div_euclid(1000))),
+                );
+            }
+            // the delta once the studies know the POC level height (it needs the bars): the bars on
+            // screen first
+            if p.delta_want > 0 && p.delta == DeltaAsked::Nothing && self.connected
+                && let Some(row) = p.studies.delta_row()
+            {
+                self.store.track_delta(&p.symbol, p.tf, row);
+                let count = p.delta_want.min(panes::DELTA_FIRST);
+                cmds.push(Command::Delta { symbol: p.symbol.clone(), tf: p.tf, count, row, skip: 0 });
+                p.delta = if count < p.delta_want { DeltaAsked::Screen(Instant::now()) } else { DeltaAsked::All };
+            }
         }
-        if self.delta_want > 0 && !self.delta_requested && self.connected
-            && let Some(row) = self.studies.delta_row()
-        {
-            self.delta_requested = true;
-            self.store.track_delta(&self.symbol, self.tf, row);
-            let cmd = Command::Delta { symbol: self.symbol.clone(), tf: self.tf, count: self.delta_want, row };
-            self.send_all(vec![cmd]);
+        // then the rest of each, behind every chart's first part (or after a while, so a chart still
+        // without data doesn't hold the others)
+        let first_parts_out = self.panes.iter().all(|p| p.delta_want == 0 || p.delta != DeltaAsked::Nothing);
+        for p in &mut self.panes {
+            if let DeltaAsked::Screen(at) = p.delta
+                && (first_parts_out || at.elapsed() >= panes::DELTA_REST_AFTER)
+                && let Some(d) = self.store.deltas(&p.symbol, p.tf)
+            {
+                let skip = panes::DELTA_FIRST;
+                cmds.push(Command::Delta { symbol: p.symbol.clone(), tf: p.tf, count: p.delta_want - skip, row: d.row, skip });
+                p.delta = DeltaAsked::All;
+            }
         }
+        if self.panes.iter().any(|p| matches!(p.delta, DeltaAsked::Screen(_))) {
+            ui.ctx().request_repaint_after(panes::DELTA_REST_AFTER);
+        }
+        self.send_all(cmds);
         #[cfg(has_preset)]
         if let Some(v) = self.verify.as_mut() {
-            let cmds = v.poll(warm, &self.symbol, self.tf);
+            let p = &self.panes[self.active];
+            let cmds = v.poll(warm[self.active], &p.symbol, p.tf);
             let done = v.done.then(|| v.path.clone());
             self.send_all(cmds);
             if let Some(path) = done {
@@ -1183,64 +1438,128 @@ impl App {
             }
         }
 
-        // trade lines drag and the context menu opens only when orders may go out (same locks as the ticket)
+        // trade lines drag and the context menu opens only when orders may go out (same locks as the
+        // ticket), and only in the active chart: the ticket trades its symbol
         let can_trade = self.trading.can_trade(self.connected, self.is_real());
-        let positions = self.trading.levels(&self.symbol, &self.pal, can_trade);
         let show = self.settings.chart.show_studies;
-        let (overlays, map_levels, pane, volume, marks, shading, ribbon, legend) = if show {
-            let s = &self.studies;
-            (s.overlays(), s.map_levels(), s.pane(), s.volume(), s.marks(), s.shading(), s.ribbon(), s.legend())
-        } else {
-            (Vec::new(), Vec::new(), None, None, None, None, None, Vec::new())
-        };
-        let study_names: Vec<(&'static str, &'static str)> =
-            if show { self.studies.params().iter().map(|p| (p.key, p.name)).collect() } else { Vec::new() };
         let volume_text = self.trading.volume_text();
         let empty = Series::default();
+        let many = self.panes.len() > 1;
+        let mut clicked = None;
+        let mut hovered = None;
+        let mut actions = Vec::new();
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            let data = ChartData {
-                series: self.store.get(&self.symbol, self.tf).unwrap_or(&empty),
-                symbol: &self.symbol,
-                tf: self.tf,
-                server_now,
-                levels: &positions,
-                overlays: &overlays,
-                map_levels: &map_levels,
-                pane: pane.as_ref(),
-                pane_open: self.settings.ui.pane_open,
-                layers: &self.settings.chart.layers,
-                quote: self.trading.quote,
-                can_trade,
-                cursor: self.settings.chart.cursor,
-                tick: self.trading.tick_size(),
-                order_volume: &volume_text,
-                bracket: Some(self.trading.bracket()),
-                volume,
-                marks,
-                shading,
-                ribbon,
-                legend: &legend,
-                studies: &study_names,
-            };
-            self.view.ui(ui, &data, &self.pal);
+            let area = ui.available_rect_before_wrap();
+            if many {
+                ui.painter().rect_filled(area, 0.0, self.pal.panel_bg);
+            }
+            let cells = panes::cells(self.settings.chart.layout, area, if many { 2.0 } else { 0.0 });
+            for (i, (p, cell)) in self.panes.iter_mut().zip(cells).enumerate() {
+                let active = i == self.active;
+                let trade = can_trade && active;
+                let positions = self.trading.levels(&p.symbol, &self.pal, trade);
+                let (overlays, map_levels, pane, volume, marks, shading, ribbon, legend) = if show {
+                    let s = &p.studies;
+                    (s.overlays(), s.map_levels(), s.pane(), s.volume(), s.marks(), s.shading(), s.ribbon(), s.legend())
+                } else {
+                    (Vec::new(), Vec::new(), None, None, None, None, None, Vec::new())
+                };
+                let study_names: Vec<(&'static str, &'static str)> =
+                    if show { p.studies.params().iter().map(|p| (p.key, p.name)).collect() } else { Vec::new() };
+                let quote = if active { self.trading.quote } else { self.quotes.get(&p.symbol).map(|&(bid, ask, _)| (bid, ask)) };
+                let data = ChartData {
+                    series: self.store.get(&p.symbol, p.tf).unwrap_or(&empty),
+                    symbol: &p.symbol,
+                    tf: p.tf,
+                    server_now,
+                    levels: &positions,
+                    overlays: &overlays,
+                    map_levels: &map_levels,
+                    pane: pane.as_ref(),
+                    pane_open: self.settings.ui.pane_open,
+                    layers: &self.settings.chart.layers,
+                    quote,
+                    can_trade: trade,
+                    cursor: self.settings.chart.cursor,
+                    tick: if active { self.trading.tick_size() } else { self.trading.tick_size_of(&p.symbol) },
+                    order_volume: &volume_text,
+                    bracket: active.then(|| self.trading.bracket()),
+                    volume,
+                    marks,
+                    shading,
+                    ribbon,
+                    legend: &legend,
+                    studies: &study_names,
+                    active,
+                };
+                ui.scope_builder(egui::UiBuilder::new().max_rect(cell).id_salt(("chart", i)), |ui| p.view.ui(ui, &data, &self.pal));
+                // a press in a chart makes it the active one at once, the pointer resting over it after
+                // `HOVER_FOCUS` (both after this frame: that press never trades). Not while a button is held
+                // (dragging), a menu is open or the pointer is over a window.
+                if many && ui.input(|inp| inp.pointer.any_pressed() && inp.pointer.interact_pos().is_some_and(|pos| cell.contains(pos))) {
+                    clicked = Some(i);
+                }
+                // read the pointer first: the layer lookup locks the context, which `input` holds (deadlock)
+                let ctx = ui.ctx();
+                let resting = ui.input(|inp| inp.pointer.hover_pos().filter(|pos| !inp.pointer.any_down() && cell.contains(*pos)));
+                if many && let Some(pos) = resting
+                    && !egui::Popup::is_any_open(ctx)
+                    && ctx.layer_id_at(pos).is_none_or(|l| l.order == egui::Order::Background)
+                {
+                    hovered = Some(i);
+                }
+                if many && active {
+                    ui.painter().rect_stroke(cell, 0.0, egui::Stroke::new(1.5, self.pal.accent), egui::StrokeKind::Inside);
+                }
+                actions.extend(std::mem::take(&mut p.view.actions).into_iter().map(|a| (i, trade, a)));
+            }
         });
-        let actions = std::mem::take(&mut self.view.actions);
+        match (clicked, hovered) {
+            (Some(i), _) => {
+                self.activate(i);
+                self.hover_since = None;
+            }
+            (None, Some(i)) if i != self.active => {
+                let since = match self.hover_since {
+                    Some((j, t)) if j == i => t,
+                    _ => self.hover_since.insert((i, Instant::now())).1,
+                };
+                match HOVER_FOCUS.checked_sub(since.elapsed()) {
+                    Some(left) if !left.is_zero() => ui.ctx().request_repaint_after(left),
+                    _ => {
+                        self.activate(i);
+                        self.hover_since = None;
+                    }
+                }
+            }
+            _ => self.hover_since = None,
+        }
+        self.sync_auto_scale();
         let mut cmds: Vec<Command> = Vec::new();
-        for a in actions {
+        for (i, trade, a) in actions {
             match a {
                 chart::ChartAction::TogglePane => {
                     self.settings.ui.pane_open = !self.settings.ui.pane_open;
                     self.save_ui_state();
                 }
                 chart::ChartAction::EditStudy(key) => {
+                    self.activate(i);
                     self.study_open = Some(key);
                     self.fib_levels = fib_text(&self.settings.fibonacci.levels);
                 }
-                a if can_trade => cmds.extend(self.trading.chart_action(a, &self.symbol)),
+                a if trade => cmds.extend(self.trading.chart_action(a, &symbol)),
                 _ => {}
             }
         }
         self.send_all(cmds);
+    }
+}
+
+/// The shape of a grid, drawn small (menu of charts side by side).
+fn grid_icon(ui: &mut egui::Ui, grid: Grid, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 14.0), egui::Sense::hover());
+    for cell in panes::cells(grid, rect, 2.0) {
+        ui.painter().rect_stroke(cell, 1.0, egui::Stroke::new(1.0, color), egui::StrokeKind::Inside);
     }
 }
 
@@ -1263,10 +1582,14 @@ struct Args {
     verify: Option<String>,
     /// No other instance is running: this one serves `ctl`.
     primary: bool,
+    /// The EA's port, opened before the window so the EA connects while the GPU starts.
+    bridge: Option<Result<Feed, String>>,
+    /// The egui context, once the window exists (the bridge's wake-up waits for it).
+    wake: std::sync::Arc<std::sync::OnceLock<egui::Context>>,
 }
 
 fn parse_args(raw: &[String]) -> Args {
-    let mut args = Args { synthetic: false, symbol: None, tf: None, verify: None, primary: true };
+    let mut args = Args { synthetic: false, symbol: None, tf: None, verify: None, primary: true, bridge: None, wake: Default::default() };
     let mut it = raw.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1330,6 +1653,17 @@ fn main() -> eframe::Result {
         }
         args.primary = false;
     }
+    // open the EA's port first: it connects (and the first history comes) while the window and the
+    // GPU start; events wait in the channel until the first frame
+    let wake = args.wake.clone();
+    args.bridge = Some(
+        feed::bridge::spawn(feed::bridge::DEFAULT_ADDR, move || {
+            if let Some(ctx) = wake.get() {
+                ctx.request_repaint();
+            }
+        })
+        .map_err(|e| format!("não abriu {}: {e}", feed::bridge::DEFAULT_ADDR)),
+    );
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MT5 Terminal")

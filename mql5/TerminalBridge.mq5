@@ -6,7 +6,7 @@
 //| Veja docs/protocol.md.                                           |
 //+------------------------------------------------------------------+
 #property copyright "MT5 Terminal"
-#property version   "7.00"
+#property version   "8.00"
 #property description "Ponte do MT5 Terminal: cotações, histórico e ordens por TCP local."
 
 input string InpHost      = "127.0.0.1"; // Endereço do app
@@ -15,9 +15,10 @@ input ulong  InpMagic     = 47011;       // Número mágico das ordens do app
 input ulong  InpDeviation = 20;          // Desvio máximo a mercado (pontos)
 input int    InpTimerMs   = 10;          // Ciclo (ms): ticks, comandos e estado
 
-#define BRIDGE_VERSION 7 // sobe quando o protocolo muda; o app avisa se o EA for mais antigo
-#define RECONNECT_MS 1000
+#define BRIDGE_VERSION 9 // sobe quando o protocolo muda; o app avisa se o EA for mais antigo
+#define RECONNECT_MS 250 // no localhost, tentar sem app falha na hora: reconectar logo abre o app mais rápido
 #define STATE_MS     100
+#define SYMBOL_MS    5000 // valores monetários do tick acompanham conversões cambiais
 #define MAX_TICKS    2000
 
 int      g_sock = INVALID_HANDLE;
@@ -40,13 +41,15 @@ long     g_hBefore[];   // 0 = os mais recentes; senão, os anteriores a este ho
 int      g_hTries[];
 
 ulong    g_nextState = 0;
+ulong    g_nextSymbol = 0;
 
 // delta de volume por candle (comando "delta"): um pedido por vez, uma leitura de ticks por ciclo
-#define DELTA_CHUNK_MSC 21600000 // ticks lidos em blocos de até 6 horas
+#define DELTA_CHUNK_MSC 86400000 // ticks lidos em blocos de até 24 horas: cada leitura custa ~120 ms fixos no MT5, quase independente do tamanho; menos leituras = menos pausas para ticks e ordens
 #define DELTA_TRIES     20       // bloco sem ticks (histórico baixando) é pulado depois disso
 string   g_qSym[];
 string   g_qTf[];
 int      g_qCount[];
+int      g_qSkip[];                // candles fechados mais novos a pular (o app já os pediu antes)
 double   g_qRow[];
 double   g_dRow = 0;              // altura do nível da POC (0 = sem POC)
 string   g_dSym = "";
@@ -157,6 +160,7 @@ void Disconnect()
    ArrayResize(g_qSym, 0);
    ArrayResize(g_qTf, 0);
    ArrayResize(g_qCount, 0);
+   ArrayResize(g_qSkip, 0);
    ArrayResize(g_qRow, 0);
    g_dNext = -1;
    g_nextConnect = GetTickCount64() + RECONNECT_MS;
@@ -249,6 +253,8 @@ void SendSymbol(const string sym)
    int d = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
    Send("{\"t\":\"symbol\",\"symbol\":\"" + Esc(sym) + "\",\"digits\":" + IntegerToString(d) +
         ",\"tick_size\":" + Num(SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE), d) +
+        ",\"tick_value_profit\":" + Num(SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE_PROFIT), 10) +
+        ",\"tick_value_loss\":" + Num(SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE_LOSS), 10) +
         ",\"vol_min\":" + Num(SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN), 8) +
         ",\"vol_max\":" + Num(SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX), 8) +
         ",\"vol_step\":" + Num(SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP), 8) + "}\n");
@@ -475,13 +481,25 @@ bool SendHistory(const string sym, const string tf, const int count, const long 
         }
       return(false);
      }
+   // espaço reservado e partes acrescentadas uma a uma: sem realocar nem criar strings temporárias
+   // a cada candle (5000 candles levavam ~1,2 s concatenando)
    string out = BarsHead(sym, tf, d, before);
+   StringReserve(out, StringLen(out) + n * (6 * (d + 12)) + 8);
    for(int i = 0; i < n; i++)
      {
-      if(i > 0)
-         StringAdd(out, ",");
-      StringAdd(out, "[" + IntegerToString((long)rates[i].time) + "," + Num(rates[i].open, d) + "," + Num(rates[i].high, d) +
-                "," + Num(rates[i].low, d) + "," + Num(rates[i].close, d) + "," + IntegerToString(rates[i].tick_volume) + "]");
+      StringAdd(out, i > 0 ? ",[" : "[");
+      StringAdd(out, IntegerToString((long)rates[i].time));
+      StringAdd(out, ",");
+      StringAdd(out, DoubleToString(rates[i].open, d));
+      StringAdd(out, ",");
+      StringAdd(out, DoubleToString(rates[i].high, d));
+      StringAdd(out, ",");
+      StringAdd(out, DoubleToString(rates[i].low, d));
+      StringAdd(out, ",");
+      StringAdd(out, DoubleToString(rates[i].close, d));
+      StringAdd(out, ",");
+      StringAdd(out, IntegerToString(rates[i].tick_volume));
+      StringAdd(out, "]");
      }
    StringAdd(out, "]}\n");
    if(before == 0)
@@ -900,23 +918,24 @@ void StartDelta()
      {
       g_dSym = g_qSym[0];
       g_dTf = g_qTf[0];
-      int count = g_qCount[0];
+      int count = g_qCount[0], skip = g_qSkip[0];
       g_dRow = g_qRow[0];
       ArrayRemove(g_qSym, 0, 1);
       ArrayRemove(g_qTf, 0, 1);
       ArrayRemove(g_qCount, 0, 1);
+      ArrayRemove(g_qSkip, 0, 1);
       ArrayRemove(g_qRow, 0, 1);
       ENUM_TIMEFRAMES period = TfFromLabel(g_dTf);
       if(period == PERIOD_CURRENT || !SymbolSelect(g_dSym, true))
          continue;
       g_dPeriodMsc = (long)PeriodSeconds(period) * 1000;
-      int n = CopyTime(g_dSym, period, 1, count, g_dTimes);
+      int n = CopyTime(g_dSym, period, 1 + MathMax(skip, 0), count, g_dTimes);
       g_dNext = n > 0 ? n - 1 : -1;
       g_dTries = 0;
      }
   }
 
-//--- um bloco: os candles pendentes seguidos que cabem em 6 horas, numa só leitura de ticks
+//--- um bloco: os candles pendentes seguidos que cabem em DELTA_CHUNK_MSC, numa só leitura de ticks
 void DeltaStep()
   {
    StartDelta();
@@ -996,11 +1015,13 @@ void Handle(const string line)
       ArrayResize(g_qSym, k + 1);
       ArrayResize(g_qTf, k + 1);
       ArrayResize(g_qCount, k + 1);
+      ArrayResize(g_qSkip, k + 1);
       ArrayResize(g_qRow, k + 1);
       g_qRow[k] = JNum(line, "row");
       g_qSym[k] = JStr(line, "symbol");
       g_qTf[k] = JStr(line, "tf");
       g_qCount[k] = (int)JInt(line, "count");
+      g_qSkip[k] = (int)JInt(line, "skip");
      }
    else if(t == "objects")
       ProbeObjects(line);
@@ -1102,6 +1123,12 @@ void OnTimer()
      {
       g_nextState = GetTickCount64() + STATE_MS;
       SendState(false);
+     }
+   if(g_sock != INVALID_HANDLE && GetTickCount64() >= g_nextSymbol)
+     {
+      g_nextSymbol = GetTickCount64() + SYMBOL_MS;
+      for(int i = 0; i < ArraySize(g_syms) && g_sock != INVALID_HANDLE; i++)
+         SendSymbol(g_syms[i]);
      }
    // por último, e uma leitura por ciclo: ticks e ordens não esperam pelo delta
    if(g_sock != INVALID_HANDLE)

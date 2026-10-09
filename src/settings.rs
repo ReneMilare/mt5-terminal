@@ -19,9 +19,17 @@ pub const DEFAULT_TOML: &str = r##"# MT5 Terminal — configuração.
 [chart]
 # Símbolos do seletor (nomes exatos do MT5).
 symbols = ["UsaTec", "UsaInd", "UsaRus"]
-# Símbolo e timeframe ao abrir (M1, M5, M15, M30, H1, H4, D1, W1).
+# Símbolo e timeframe do primeiro gráfico (M1, M5, M15, M30, H1, H4, D1, W1). O app grava a escolha.
 symbol = "UsaTec"
 timeframe = "M5"
+# Gráficos lado a lado (também pelo menu "Gráficos"): "1" (um só), "2" (dois lado a lado),
+# "2v" (dois, um sobre o outro), "3" (três lado a lado), "4" (2×2) ou "6" (3×2).
+# Cada gráfico tem símbolo, timeframe e indicadores próprios. O ativo (borda em destaque) é o que está
+# sob o mouse parado, ou o clicado por último: segue a barra superior, a data, a boleta e os atalhos.
+layout = "1"
+# Os outros gráficos, em ordem, como "SÍMBOLO TIMEFRAME" (ex.: ["UsaInd M5", "UsaRus M15"]); o app
+# grava a escolha de cada um. Faltando, usa o próximo símbolo de `symbols` no timeframe do primeiro.
+charts = []
 # Ordem de desenho, de trás para a frente: o último fica na frente.
 # Camadas: "levels" (níveis), "indicators" (linhas), "trades" (posições e ordens), "price" (candles).
 layers = ["levels", "indicators", "trades", "price"]
@@ -31,6 +39,9 @@ show_studies = true
 first_bars = 1000
 # Cursor: "arrow" (seta), "hand" (mão para arrastar), "cross" (cruz para medir % e barras).
 cursor = "hand"
+# Ajustar o eixo de preços aos candles visíveis. Arrastar o gráfico mantém a escala automática.
+# Ajustar o eixo de preços manualmente desliga; "Reenquadrar" liga de novo.
+auto_scale = true
 
 [fibonacci]
 # Níveis no mapa de convergências, no M5, M15, H1 e D1.
@@ -125,6 +136,83 @@ pub struct Chart {
     pub show_studies: bool,
     pub first_bars: u32,
     pub cursor: CursorMode,
+    pub auto_scale: bool,
+    pub layout: Grid,
+    /// Charts after the first, as "SYMBOL TIMEFRAME" (`chart_entry`).
+    pub charts: Vec<String>,
+}
+
+/// How many charts the window shows, and how they are arranged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub enum Grid {
+    #[default]
+    #[serde(rename = "1")]
+    One,
+    #[serde(rename = "2")]
+    Two,
+    #[serde(rename = "2v")]
+    TwoStacked,
+    #[serde(rename = "3")]
+    Three,
+    #[serde(rename = "4")]
+    Four,
+    #[serde(rename = "6")]
+    Six,
+}
+
+impl Grid {
+    pub const ALL: [Grid; 6] = [Grid::One, Grid::Two, Grid::TwoStacked, Grid::Three, Grid::Four, Grid::Six];
+
+    /// Name in the config file and in `ctl`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Grid::One => "1",
+            Grid::Two => "2",
+            Grid::TwoStacked => "2v",
+            Grid::Three => "3",
+            Grid::Four => "4",
+            Grid::Six => "6",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Grid> {
+        Grid::ALL.into_iter().find(|g| g.key() == key)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Grid::One => "1 gráfico",
+            Grid::Two => "2 lado a lado",
+            Grid::TwoStacked => "2 empilhados",
+            Grid::Three => "3 lado a lado",
+            Grid::Four => "4 (2×2)",
+            Grid::Six => "6 (3×2)",
+        }
+    }
+
+    /// Columns and rows.
+    pub fn shape(self) -> (usize, usize) {
+        match self {
+            Grid::One => (1, 1),
+            Grid::Two => (2, 1),
+            Grid::TwoStacked => (1, 2),
+            Grid::Three => (3, 1),
+            Grid::Four => (2, 2),
+            Grid::Six => (3, 2),
+        }
+    }
+
+    pub fn count(self) -> usize {
+        let (c, r) = self.shape();
+        c * r
+    }
+}
+
+/// "SYMBOL TIMEFRAME" of `chart.charts` (the symbol may not contain spaces in MT5 either way).
+pub fn chart_entry(text: &str) -> Option<(String, Timeframe)> {
+    let (symbol, tf) = text.trim().rsplit_once(char::is_whitespace)?;
+    let (symbol, tf) = (symbol.trim(), Timeframe::parse(tf)?);
+    (!symbol.is_empty()).then(|| (symbol.to_string(), tf))
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -384,6 +472,19 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
     if !s.chart.symbols.contains(&s.chart.symbol) {
         s.chart.symbols.insert(0, s.chart.symbol.clone());
     }
+    let mut charts = Vec::new();
+    for text in std::mem::take(&mut s.chart.charts) {
+        match chart_entry(&text) {
+            Some((symbol, tf)) => {
+                if !s.chart.symbols.contains(&symbol) {
+                    s.chart.symbols.push(symbol.clone());
+                }
+                charts.push(format!("{symbol} {}", tf.label()));
+            }
+            None => warnings.push(format!("chart.charts: {text:?} ignorado; use \"SÍMBOLO TIMEFRAME\", ex.: \"UsaInd M5\"")),
+        }
+    }
+    s.chart.charts = charts;
     for p in &s.presets {
         if p.unit != "percent" && p.unit != "points" {
             return Err(format!("presets \"{}\": unit = {:?}: use \"percent\" ou \"points\"", p.name, p.unit));
@@ -660,6 +761,22 @@ pub fn save_cursor(cursor: CursorMode) -> std::io::Result<()> {
     edit_chart(|chart| chart["cursor"] = toml_edit::value(cursor.key()))
 }
 
+pub fn save_auto_scale(enabled: bool) -> std::io::Result<()> {
+    edit_chart(|chart| chart["auto_scale"] = toml_edit::value(enabled))
+}
+
+/// The grid and every chart's symbol and timeframe: the first in `symbol`/`timeframe`, the others in
+/// `charts` (entries past the open charts are kept, for when the grid grows again).
+pub fn save_charts(layout: Grid, symbol: &str, tf: Timeframe, charts: &[String]) -> std::io::Result<()> {
+    let array: toml_edit::Array = charts.iter().map(String::as_str).collect();
+    edit_chart(|chart| {
+        chart["symbol"] = toml_edit::value(symbol);
+        chart["timeframe"] = toml_edit::value(tf.label());
+        chart["layout"] = toml_edit::value(layout.key());
+        chart["charts"] = toml_edit::value(array);
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,6 +817,34 @@ mod tests {
         assert_eq!(*s.chart.layers.last().unwrap(), Layer::Price);
         assert_eq!(s.palette().up, Color32::from_rgb(0x26, 0xa6, 0x9a));
         assert_eq!(s.chart.cursor, CursorMode::Hand);
+        assert!(s.chart.auto_scale);
+    }
+
+    #[test]
+    fn charts_side_by_side_parse_and_skip_bad_entries() {
+        let (s, warnings) = parse("").unwrap();
+        assert_eq!((s.chart.layout, s.chart.charts.len()), (Grid::One, 0));
+        let (s, warnings_bad) = parse("[chart]\nlayout = '4'\ncharts = ['UsaInd m15', 'Novo H1', 'semtf', 'X Q9']").unwrap();
+        assert!(warnings.is_empty());
+        assert_eq!(s.chart.layout, Grid::Four);
+        assert_eq!(s.chart.layout.count(), 4);
+        assert_eq!(s.chart.charts, ["UsaInd M15", "Novo H1"]);
+        assert!(s.chart.symbols.contains(&"Novo".to_string()));
+        assert_eq!(warnings_bad.len(), 2);
+        assert!(parse("[chart]\nlayout = '5'").is_err());
+        assert_eq!(chart_entry(" WIN$N  M5 "), Some(("WIN$N".into(), Timeframe::M5)));
+        for g in Grid::ALL {
+            assert_eq!(Grid::from_key(g.key()), Some(g));
+        }
+    }
+
+    #[test]
+    fn auto_scale_defaults_for_old_configs_and_accepts_manual_mode() {
+        assert!(parse("[chart]\nsymbol = 'X'").unwrap().0.chart.auto_scale);
+        let (s, warnings) = parse("[chart]\nauto_scale = false").unwrap();
+        assert!(!s.chart.auto_scale);
+        assert!(warnings.is_empty());
+        assert!(parse("[chart]\nauto_scale = 'false'").is_err());
     }
 
     #[test]

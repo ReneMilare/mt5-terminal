@@ -1,7 +1,7 @@
 //! Order ticket, positions and pending orders. Knows nothing about where orders go: it turns clicks into
 //! [`Command`]s and folds the source's trade messages back into its state.
 
-use crate::chart::{ChartAction, Handle, Level};
+use crate::chart::{ChartAction, Handle, Level, LevelValue};
 use crate::feed::{Command, Message, OrderKind, PendingOrder, Position, Side};
 use crate::settings::Preset;
 use crate::theme::Palette;
@@ -58,10 +58,13 @@ impl Bracket {
     }
 }
 
-/// Trading rules of the chart symbol.
+/// Trading rules of a symbol.
+#[derive(Clone)]
 pub struct Spec {
     pub digits: u32,
     pub tick_size: f64,
+    pub tick_value_profit: f64,
+    pub tick_value_loss: f64,
     pub vol_min: f64,
     pub vol_max: f64,
     pub vol_step: f64,
@@ -95,6 +98,8 @@ pub struct Trading {
     pub funds: Option<Funds>,
     pub day_result: Option<DayResult>,
     pub spec: Option<Spec>,
+    /// Rules of every symbol the source described (charts side by side show their trades too).
+    specs: HashMap<String, Spec>,
     /// Bid/ask of the chart symbol.
     pub quote: Option<(f64, f64)>,
     volume: f64,
@@ -126,6 +131,7 @@ impl Default for Trading {
             funds: None,
             day_result: None,
             spec: None,
+            specs: HashMap::new(),
             quote: None,
             volume: 0.0,
             kind: OrderKind::Market,
@@ -185,27 +191,39 @@ impl Trading {
         self.funds = None;
         self.day_result = None;
         self.spec = None;
+        self.specs.clear();
         self.quote = None;
         self.requests.clear();
         self.armed = false;
     }
 
-    /// New chart symbol: its rules and quote come again from the source.
-    pub fn symbol_changed(&mut self) {
+    /// New ticket symbol (`quote`: its last bid/ask, if any): its rules, when already known, or
+    /// they come again from the source.
+    pub fn symbol_changed(&mut self, symbol: &str, quote: Option<(f64, f64)>) {
         self.spec = None;
-        self.quote = None;
+        if let Some(spec) = self.specs.get(symbol).cloned() {
+            self.set_spec(spec);
+        }
+        self.quote = quote;
         self.price = 0.0;
+    }
+
+    fn set_spec(&mut self, spec: Spec) {
+        self.volume = if self.volume <= 0.0 { spec.vol_min } else { round_to(self.volume, spec.vol_step).clamp(spec.vol_min, spec.vol_max) };
+        self.spec = Some(spec);
     }
 
     /// Fold a source message in. Returns false when it isn't a trading message.
     pub fn on_message(&mut self, msg: &Message, chart_symbol: &str) -> bool {
         match msg {
-            Message::Symbol { symbol, digits, tick_size, vol_min, vol_max, vol_step } if symbol == chart_symbol => {
-                let spec = Spec { digits: *digits, tick_size: *tick_size, vol_min: *vol_min, vol_max: *vol_max, vol_step: *vol_step };
-                self.volume = if self.volume <= 0.0 { spec.vol_min } else { round_to(self.volume, spec.vol_step).clamp(spec.vol_min, spec.vol_max) };
-                self.spec = Some(spec);
+            Message::Symbol { symbol, digits, tick_size, tick_value_profit, tick_value_loss, vol_min, vol_max, vol_step } => {
+                let spec = Spec { digits: *digits, tick_size: *tick_size, tick_value_profit: *tick_value_profit, tick_value_loss: *tick_value_loss,
+                    vol_min: *vol_min, vol_max: *vol_max, vol_step: *vol_step };
+                self.specs.insert(symbol.clone(), spec.clone());
+                if symbol == chart_symbol {
+                    self.set_spec(spec);
+                }
             }
-            Message::Symbol { .. } => {}
             Message::Account { balance, equity, margin_free, currency, trade_allowed } => {
                 self.funds = Some(Funds {
                     balance: *balance,
@@ -280,16 +298,24 @@ impl Trading {
     /// Lines for the chart: positions solid, pending orders dashed, stops and targets in their color.
     /// With `draggable`, each line carries the handle that moves it.
     pub fn levels(&self, symbol: &str, pal: &Palette, draggable: bool) -> Vec<Level> {
-        let vd = self.spec.as_ref().map(|s| step_decimals(s.vol_step)).unwrap_or(2);
+        let spec = self.specs.get(symbol);
+        let vd = spec.map(|s| step_decimals(s.vol_step)).unwrap_or(2);
         let color = |side| if side == Side::Buy { pal.up } else { pal.down };
         let handle = |h: Handle| draggable.then_some(h);
         let mut out = Vec::new();
-        let stops = |out: &mut Vec<Level>, ticket: u64, sl: f64, tp: f64| {
+        let stops = |out: &mut Vec<Level>, ticket: u64, entry: f64, side: Side, volume: f64, sl: f64, tp: f64| {
+            let per_point = |profit: bool| spec.and_then(|s| {
+                let tick_value = if profit { s.tick_value_profit } else { s.tick_value_loss };
+                (s.tick_size.is_finite() && s.tick_size > 0.0 && tick_value.is_finite() && tick_value > 0.0
+                    && volume.is_finite() && volume > 0.0).then(|| volume * tick_value / s.tick_size)
+            });
+            let value = LevelValue { entry, side, profit_per_point: per_point(true), loss_per_point: per_point(false),
+                currency: self.funds.as_ref().map(|f| f.currency.clone()).unwrap_or_default() };
             if sl > 0.0 {
-                out.push(Level { price: sl, color: pal.danger, label: format!("SL #{ticket}"), dashed: true, handle: handle(Handle::Sl(ticket)), side: None });
+                out.push(Level { price: sl, color: pal.danger, label: format!("SL #{ticket}"), dashed: true, handle: handle(Handle::Sl(ticket)), side: None, value: Some(value.clone()) });
             }
             if tp > 0.0 {
-                out.push(Level { price: tp, color: pal.ok, label: format!("TP #{ticket}"), dashed: true, handle: handle(Handle::Tp(ticket)), side: None });
+                out.push(Level { price: tp, color: pal.ok, label: format!("TP #{ticket}"), dashed: true, handle: handle(Handle::Tp(ticket)), side: None, value: Some(value) });
             }
         };
         for p in self.positions.iter().filter(|p| p.symbol == symbol) {
@@ -301,8 +327,9 @@ impl Trading {
                 dashed: false,
                 handle: handle(Handle::Position(p.ticket)),
                 side: Some(p.side),
+                value: None,
             });
-            stops(&mut out, p.ticket, p.sl, p.tp);
+            stops(&mut out, p.ticket, p.price, p.side, p.volume, p.sl, p.tp);
         }
         for o in self.orders.iter().filter(|o| o.symbol == symbol) {
             let s = format!("{}{}", if o.side == Side::Buy { "C" } else { "V" }, if o.kind == OrderKind::Limit { "L" } else { "S" });
@@ -313,8 +340,9 @@ impl Trading {
                 dashed: true,
                 handle: handle(Handle::Order(o.ticket)),
                 side: None,
+                value: None,
             });
-            stops(&mut out, o.ticket, o.sl, o.tp);
+            stops(&mut out, o.ticket, o.price, o.side, o.volume, o.sl, o.tp);
         }
         out
     }
@@ -391,6 +419,11 @@ impl Trading {
     /// Price step of the chart symbol (0 = unknown).
     pub fn tick_size(&self) -> f64 {
         self.spec.as_ref().map(|s| s.tick_size).unwrap_or(0.0)
+    }
+
+    /// Price step of any symbol the source described (0 = unknown).
+    pub fn tick_size_of(&self, symbol: &str) -> f64 {
+        self.specs.get(symbol).map(|s| s.tick_size).unwrap_or(0.0)
     }
 
     /// The ticket's volume as shown.
@@ -815,7 +848,7 @@ mod tests {
         let msg = Message::DailyResult { day_start: 1791331200, realized: Some(-6.36), floating: 2.0, currency: "USD".into() };
         assert!(t.on_message(&msg, "UsaTec"));
         assert!((t.day_result.as_ref().unwrap().total().unwrap() + 4.36).abs() < 1e-9);
-        t.symbol_changed();
+        t.symbol_changed("UsaInd", None);
         assert_eq!(t.day_total_text(), "Dia: -4.36 USD");
         assert!(t.on_message(&Message::DailyResult { day_start: 1791417600, realized: None, floating: 3.0, currency: "BRL".into() }, "UsaInd"));
         assert_eq!(t.day_result.as_ref().unwrap().total(), None);
@@ -845,7 +878,7 @@ mod tests {
     fn market_order_levels_from_quote() {
         let mut t = Trading::default();
         t.on_message(
-            &Message::Symbol { symbol: "X".into(), digits: 2, tick_size: 0.25, vol_min: 0.1, vol_max: 10.0, vol_step: 0.1 },
+            &Message::Symbol { symbol: "X".into(), digits: 2, tick_size: 0.25, tick_value_profit: 0.25, tick_value_loss: 0.25, vol_min: 0.1, vol_max: 10.0, vol_step: 0.1 },
             "X",
         );
         t.on_message(&Message::Tick { symbol: "X".into(), time_msc: 0, bid: 100.0, ask: 100.5, volume: 0.0 }, "X");
@@ -858,11 +891,50 @@ mod tests {
 
     fn with_book(netting: bool) -> Trading {
         let mut t = Trading { netting, ..Trading::default() };
-        t.on_message(&Message::Symbol { symbol: "X".into(), digits: 2, tick_size: 0.25, vol_min: 0.1, vol_max: 10.0, vol_step: 0.1 }, "X");
+        t.on_message(&Message::Symbol { symbol: "X".into(), digits: 2, tick_size: 0.25, tick_value_profit: 0.25, tick_value_loss: 0.25, vol_min: 0.1, vol_max: 10.0, vol_step: 0.1 }, "X");
         t.on_message(&Message::Tick { symbol: "X".into(), time_msc: 0, bid: 100.0, ask: 100.5, volume: 0.0 }, "X");
         t.positions = vec![Position { ticket: 7, symbol: "X".into(), side: Side::Buy, volume: 0.3, price: 99.0, sl: 0.0, tp: 104.0, profit: 0.3 }];
         t.orders = vec![PendingOrder { ticket: 8, symbol: "X".into(), side: Side::Sell, kind: OrderKind::Limit, volume: 0.1, price: 103.0, sl: 105.0, tp: 101.0 }];
         t
+    }
+
+    #[test]
+    fn ticket_symbol_change_reuses_known_rules_and_levels_use_their_symbol() {
+        let mut t = with_book(true);
+        let spec = |symbol: &str, tick_size| Message::Symbol { symbol: symbol.into(), digits: 2, tick_size, tick_value_profit: 1.0,
+            tick_value_loss: 1.0, vol_min: 1.0, vol_max: 10.0, vol_step: 1.0 };
+        t.on_message(&spec("Y", 5.0), "X");
+        assert_eq!(t.tick_size(), 0.25, "another symbol's rules don't replace the ticket's");
+        assert_eq!(t.tick_size_of("Y"), 5.0);
+        t.symbol_changed("Y", Some((10.0, 15.0)));
+        assert_eq!((t.tick_size(), t.quote), (5.0, Some((10.0, 15.0))));
+        t.symbol_changed("Z", None);
+        assert!(t.spec.is_none() && t.quote.is_none());
+        assert!(!t.levels("X", &Palette::default(), false).is_empty(), "a side chart still shows its symbol's trades");
+    }
+
+    #[test]
+    fn stop_and_target_labels_value_buys_sells_and_protected_profit_in_account_currency() {
+        let mut t = with_book(true);
+        t.specs.get_mut("X").unwrap().tick_value_profit = 0.5;
+        t.specs.get_mut("X").unwrap().tick_value_loss = 0.75;
+        t.funds = Some(Funds { balance: 1000.0, equity: 1000.0, margin_free: 1000.0, currency: "USD".into(), trade_allowed: true });
+        let p = &mut t.positions[0];
+        (p.price, p.volume, p.sl, p.tp) = (100.0, 2.0, 90.0, 110.0);
+        let o = &mut t.orders[0];
+        (o.price, o.volume, o.sl, o.tp) = (100.0, 2.0, 110.0, 90.0);
+        let levels = t.levels("X", &Palette::default(), false);
+        let labels: Vec<_> = levels.iter().filter(|l| l.value.is_some()).map(|l| l.label_at(l.price)).collect();
+        assert_eq!(labels, ["SL #7 · USD -60.00 · -10.00%", "TP #7 · USD +40.00 · +10.00%",
+            "SL #8 · USD -60.00 · -10.00%", "TP #8 · USD +40.00 · +10.00%"]);
+        assert!(levels.iter().all(|l| l.handle.is_none()), "values stay visible while trading is locked");
+        t.positions[0].sl = 105.0;
+        let levels = t.levels("X", &Palette::default(), true);
+        assert_eq!(levels[1].label_at(levels[1].price), "SL #7 · USD +20.00 · +5.00%");
+        assert_eq!(levels[1].label_at(100.0), "SL #7 · USD +0.00 · +0.00%");
+        t.specs.get_mut("X").unwrap().tick_value_profit = 0.0;
+        let levels = t.levels("X", &Palette::default(), true);
+        assert_eq!(levels[1].label_at(levels[1].price), "SL #7 · USD — · +5.00%", "missing tick values must not look like zero profit");
     }
 
     #[test]
