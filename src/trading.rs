@@ -113,6 +113,7 @@ pub struct Trading {
     armed: bool,
     /// Netting account (one position per symbol): reversing is a single order.
     pub netting: bool,
+    pub bridge_version: u32,
     /// Ready-made orders (config `[[presets]]`) and the active one; None = manual ticket.
     pub presets: Vec<Preset>,
     pub preset: Option<usize>,
@@ -142,6 +143,7 @@ impl Default for Trading {
             next_id: 1,
             requests: HashMap::new(),
             netting: false,
+            bridge_version: 0,
             presets: Vec::new(),
             preset: None,
             edit_presets: false,
@@ -195,6 +197,7 @@ impl Trading {
         self.quote = None;
         self.requests.clear();
         self.armed = false;
+        self.bridge_version = 0;
     }
 
     /// New ticket symbol (`quote`: its last bid/ask, if any): its rules, when already known, or
@@ -287,7 +290,11 @@ impl Trading {
             _ => format!("{} {} {volume:.vd$} {symbol} @ {}", side_label(side), kind_label(kind).to_lowercase(), self.fmt_price(price)),
         };
         let symbol = symbol.to_string();
-        Some(self.request(what, |id| Command::Order { id, symbol, side, kind, volume, price, sl, tp }))
+        Some(self.request(what, |id| if kind == OrderKind::Market {
+            Command::Trade { id, symbol, side, volume, sl, tp, reduce_only: false }
+        } else {
+            Command::Order { id, symbol, side, kind, volume, price, sl, tp }
+        }))
     }
 
     fn fmt_price(&self, v: f64) -> String {
@@ -537,6 +544,9 @@ impl Trading {
         if !connected {
             return Some("sem conexão");
         }
+        if self.bridge_version < crate::feed::BRIDGE_VERSION {
+            return Some("atualize o EA TerminalBridge para operar");
+        }
         match &self.funds {
             None => Some("aguardando a conta"),
             Some(f) if !f.trade_allowed => Some("Algo Trading desligado no MT5"),
@@ -711,6 +721,7 @@ impl Trading {
                 let text = RichText::new(format!("{title}\n{price:.p$}", p = digits as usize)).strong().size(14.0).color(Color32::WHITE);
                 let btn = egui::Button::new(text).fill(if blocked.is_none() { color } else { pal.tag_bg }).min_size(egui::vec2(half, 52.0));
                 let hint = if side == Side::Buy { "Ctrl+Shift+B" } else { "Ctrl+Shift+S" };
+                let hint = format!("{hint}\nA mercado: reduz primeiro as posições opostas; só o volume excedente abre uma posição. Limite/stop: nova ordem pendente.");
                 if ui.add_enabled(blocked.is_none(), btn).on_hover_text(hint).clicked() {
                     out.extend(self.order(symbol, side));
                 }
@@ -720,6 +731,17 @@ impl Trading {
         let net = self.net(symbol);
         let pnl: f64 = self.positions.iter().filter(|p| p.symbol == symbol).map(|p| p.profit).sum();
         let has_any = self.positions.iter().any(|p| p.symbol == symbol) || self.orders.iter().any(|o| o.symbol == symbol);
+        let volume = self.order_volume();
+        let reduce = egui::Button::new(RichText::new(format!("REDUZIR {volume:.vd$}")).strong())
+            .min_size(egui::vec2(ui.available_width(), 28.0));
+        if ui.add_enabled(blocked.is_none() && net.abs() + 1e-9 >= volume && net != 0.0, reduce)
+            .on_hover_text("Sai a mercado com o volume da boleta, preservando o stop e o alvo restantes. Nunca abre ou inverte a posição.").clicked()
+        {
+            let side = if net > 0.0 { Side::Sell } else { Side::Buy };
+            let symbol = symbol.to_string();
+            out.push(self.request(format!("Reduzir {volume:.vd$} {symbol}"), |id|
+                Command::Trade { id, symbol, side, volume, sl: 0.0, tp: 0.0, reduce_only: true }));
+        }
         let zerar = egui::Button::new(RichText::new(format!("ZERAR {symbol}")).strong()).min_size(egui::vec2(ui.available_width(), 30.0));
         let zerar = ui.add_enabled(blocked.is_none() && has_any, zerar).on_hover_text("Fecha as posições e cancela as ordens do símbolo (Ctrl+Shift+Z)");
         if zerar.clicked() {
@@ -883,8 +905,8 @@ mod tests {
         );
         t.on_message(&Message::Tick { symbol: "X".into(), time_msc: 0, bid: 100.0, ask: 100.5, volume: 0.0 }, "X");
         (t.sl_dist, t.tp_dist) = (10.1, 20.0);
-        let Some(Command::Order { side, volume, sl, tp, kind, .. }) = t.order("X", Side::Sell) else { panic!() };
-        assert_eq!((side, kind, volume), (Side::Sell, OrderKind::Market, 0.1));
+        let Some(Command::Trade { side, volume, sl, tp, reduce_only, .. }) = t.order("X", Side::Sell) else { panic!() };
+        assert_eq!((side, reduce_only, volume), (Side::Sell, false, 0.1));
         // sell at the bid: stop above, target below, on the tick grid
         assert_eq!((sl, tp), (110.0, 80.0));
     }
@@ -896,6 +918,37 @@ mod tests {
         t.positions = vec![Position { ticket: 7, symbol: "X".into(), side: Side::Buy, volume: 0.3, price: 99.0, sl: 0.0, tp: 104.0, profit: 0.3 }];
         t.orders = vec![PendingOrder { ticket: 8, symbol: "X".into(), side: Side::Sell, kind: OrderKind::Limit, volume: 0.1, price: 103.0, sl: 105.0, tp: 101.0 }];
         t
+    }
+
+    #[test]
+    fn market_buttons_and_chart_use_directional_trades_on_netting_and_hedging() {
+        for netting in [true, false] {
+            let mut t = with_book(netting);
+            t.volume = 0.1;
+            assert!(matches!(t.order("X", Side::Sell), Some(Command::Trade {
+                side: Side::Sell, volume: 0.1, reduce_only: false, ..
+            })));
+            assert!(matches!(t.chart_action(ChartAction::Order { side: Side::Sell, kind: OrderKind::Market, price: 0.0 }, "X"),
+                Some(Command::Trade { side: Side::Sell, volume: 0.1, .. })));
+            assert!(matches!(t.order_at("X", Side::Sell, OrderKind::Limit, 102.0),
+                Some(Command::Order { kind: OrderKind::Limit, .. })));
+        }
+    }
+
+    #[test]
+    fn old_bridge_and_real_account_remain_locked() {
+        let mut t = with_book(true);
+        t.funds = Some(Funds { balance: 1000.0, equity: 1000.0, margin_free: 1000.0, currency: "USD".into(), trade_allowed: true });
+        t.bridge_version = 9;
+        assert!(!t.can_trade(true, false));
+        t.bridge_version = crate::feed::BRIDGE_VERSION;
+        assert!(t.can_trade(true, false));
+        assert!(!t.can_trade(true, true));
+        t.armed = true;
+        assert!(t.can_trade(true, true));
+        t.reset();
+        assert_eq!(t.bridge_version, 0);
+        assert!(!t.armed);
     }
 
     #[test]

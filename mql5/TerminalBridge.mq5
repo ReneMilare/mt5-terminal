@@ -6,7 +6,7 @@
 //| Veja docs/protocol.md.                                           |
 //+------------------------------------------------------------------+
 #property copyright "MT5 Terminal"
-#property version   "8.00"
+#property version   "10.00"
 #property description "Ponte do MT5 Terminal: cotações, histórico e ordens por TCP local."
 
 input string InpHost      = "127.0.0.1"; // Endereço do app
@@ -15,7 +15,7 @@ input ulong  InpMagic     = 47011;       // Número mágico das ordens do app
 input ulong  InpDeviation = 20;          // Desvio máximo a mercado (pontos)
 input int    InpTimerMs   = 10;          // Ciclo (ms): ticks, comandos e estado
 
-#define BRIDGE_VERSION 9 // sobe quando o protocolo muda; o app avisa se o EA for mais antigo
+#define BRIDGE_VERSION 10 // sobe quando o protocolo muda; o app avisa se o EA for mais antigo
 #define RECONNECT_MS 250 // no localhost, tentar sem app falha na hora: reconectar logo abre o app mais rápido
 #define STATE_MS     100
 #define SYMBOL_MS    5000 // valores monetários do tick acompanham conversões cambiais
@@ -32,6 +32,20 @@ long     g_lastMsc[];    // último tick enviado de cada um
 // requisições assíncronas em voo: request_id do MT5 -> id do app
 uint     g_reqIds[];
 long     g_cliIds[];
+
+// Uma operação direcional: saídas por ticket, confirmadas antes da próxima etapa.
+MqlTradeRequest g_tradeSteps[];
+double   g_tradeBefore[];
+int      g_tradeNext = 0;
+long     g_tradeId = 0;
+uint     g_tradeRequest = 0;
+bool     g_tradeBusy = false;
+bool     g_tradeAcknowledged = false;
+bool     g_tradeAbandoned = false;
+ulong    g_tradeDeadline = 0;
+ulong    g_tradeTicket = 0;
+double   g_tradePrice = 0;
+string   g_tradeQueue[]; // cliques consecutivos: cada pedido usa o estado confirmado do anterior
 
 // pedidos de histórico; os que ainda carregam no terminal são tentados de novo
 string   g_hSym[];
@@ -146,6 +160,8 @@ string Num(const double v, const int digits) { return(DoubleToString(v, digits))
 //+------------------------------------------------------------------+
 void Disconnect()
   {
+   g_tradeAbandoned = true;
+   ArrayResize(g_tradeQueue, 0);
    if(g_sock != INVALID_HANDLE)
       SocketClose(g_sock);
    g_sock = INVALID_HANDLE;
@@ -585,7 +601,7 @@ bool OkRetcode(const uint rc)
    return(rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_DONE_PARTIAL || rc == TRADE_RETCODE_PLACED);
   }
 
-void Submit(const long id, MqlTradeRequest &rq)
+uint Submit(const long id, MqlTradeRequest &rq)
   {
    rq.magic = InpMagic;
    if(rq.comment == "")
@@ -598,13 +614,209 @@ void Submit(const long id, MqlTradeRequest &rq)
       uint rc = rs.retcode;
       string msg = rc != 0 ? RetcodeText(rc) : "OrderSendAsync falhou (erro " + IntegerToString(GetLastError()) + ")";
       SendResult(id, false, rc, msg, 0, 0.0);
-      return;
+      return(0);
      }
    int k = ArraySize(g_reqIds);
    ArrayResize(g_reqIds, k + 1);
    ArrayResize(g_cliIds, k + 1);
    g_reqIds[k] = rs.request_id;
    g_cliIds[k] = id;
+   return(rs.request_id);
+  }
+
+bool ValidVolume(const string sym, const double volume)
+  {
+   double step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   return(MathIsValidNumber(volume) && step > 0 &&
+          volume >= SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN) - 1e-9 &&
+          volume <= SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX) + 1e-9 &&
+          MathAbs(volume / step - MathRound(volume / step)) < 1e-6);
+  }
+
+void AbortTradeQueue()
+  {
+   for(int i = 0; i < ArraySize(g_tradeQueue); i++)
+      SendResult(JInt(g_tradeQueue[i], "id"), false, TRADE_RETCODE_REJECT,
+                 "não enviada: a operação anterior não foi concluída; confira a posição", 0, 0);
+   ArrayResize(g_tradeQueue, 0);
+  }
+
+void RejectTrade(const long id, const uint rc, const string msg, const ulong ticket = 0)
+  {
+   SendResult(id, false, rc, msg, ticket, 0);
+   AbortTradeQueue();
+  }
+
+void FinishTrade(const bool ok, const uint rc, const string msg)
+  {
+   g_tradeBusy = false;
+   SendResult(g_tradeId, ok, rc, msg, g_tradeTicket, g_tradePrice);
+   if(!ok || rc != TRADE_RETCODE_DONE)
+      AbortTradeQueue();
+  }
+
+void TradeStep()
+  {
+   if(!g_tradeBusy)
+     {
+      if(ArraySize(g_reqIds) == 0 && ArraySize(g_tradeQueue) > 0 && g_sock != INVALID_HANDLE)
+        {
+         string next = g_tradeQueue[0];
+         ArrayRemove(g_tradeQueue, 0, 1);
+         DoTrade(next);
+        }
+      return;
+     }
+   if(g_tradeRequest != 0)
+      return;
+   if(g_tradeAbandoned)
+     {
+      FinishTrade(false, TRADE_RETCODE_CONNECTION, "operação interrompida pela desconexão; confira a posição");
+      return;
+     }
+   if(g_tradeAcknowledged)
+     {
+      MqlTradeRequest last = g_tradeSteps[g_tradeNext];
+      // Eventos do MT5 podem chegar fora de ordem: esperar o volume confirmado aparecer.
+      double remaining = NormalizeDouble(g_tradeBefore[g_tradeNext] - last.volume, 8);
+      bool selected = PositionSelectByTicket(last.position);
+      bool updated = remaining <= 1e-9 ? !selected :
+                     selected && MathAbs(PositionGetDouble(POSITION_VOLUME) - remaining) < 1e-9;
+      if(!updated)
+        {
+         if(GetTickCount64() >= g_tradeDeadline)
+            FinishTrade(false, TRADE_RETCODE_TIMEOUT, "saída executada, mas estado não confirmado; confira a posição");
+         return;
+        }
+      g_tradeAcknowledged = false;
+      g_tradeNext++;
+     }
+   if(g_tradeNext >= ArraySize(g_tradeSteps))
+     {
+      FinishTrade(true, TRADE_RETCODE_DONE, "executada");
+      return;
+     }
+   MqlTradeRequest rq = g_tradeSteps[g_tradeNext];
+   if(rq.position != 0 && (!PositionSelectByTicket(rq.position) ||
+      MathAbs(PositionGetDouble(POSITION_VOLUME) - g_tradeBefore[g_tradeNext]) > 1e-9))
+     {
+      FinishTrade(false, TRADE_RETCODE_INVALID_VOLUME, "posição mudou durante a operação; confira o volume restante");
+      return;
+     }
+   MqlTick tick;
+   if(!SymbolInfoTick(rq.symbol, tick) || tick.bid <= 0 || tick.ask <= 0)
+     {
+      FinishTrade(false, TRADE_RETCODE_PRICE_OFF, "sem cotação");
+      return;
+     }
+   rq.price = rq.type == ORDER_TYPE_BUY ? tick.ask : tick.bid;
+   g_tradeRequest = Submit(g_tradeId, rq);
+   if(g_tradeRequest == 0)
+     {
+      g_tradeBusy = false; // Submit já informou a falha; nunca continuar nem reenviar.
+      AbortTradeQueue();
+     }
+  }
+
+void DoTrade(const string j)
+  {
+   long id = JInt(j, "id");
+   if(ArraySize(g_reqIds) > 0)
+     {
+      RejectTrade(id, TRADE_RETCODE_LOCKED, "aguarde a operação em andamento");
+      return;
+     }
+   string sym = JStr(j, "symbol"), side = JStr(j, "side");
+   double volume = JNum(j, "volume");
+   if((side != "buy" && side != "sell") || !SymbolSelect(sym, true) || !ValidVolume(sym, volume))
+     {
+      RejectTrade(id, TRADE_RETCODE_INVALID_VOLUME, "símbolo, lado ou volume inválido");
+      return;
+     }
+   bool buy = side == "buy";
+   ulong tickets[];
+   long times[];
+   for(int i = 0; i < PositionsTotal(); i++)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != sym ||
+         (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) == buy)
+         continue;
+      int k = ArraySize(tickets);
+      ArrayResize(tickets, k + 1);
+      ArrayResize(times, k + 1);
+      long time = PositionGetInteger(POSITION_TIME_MSC);
+      while(k > 0 && times[k - 1] > time)
+        {
+         tickets[k] = tickets[k - 1];
+         times[k] = times[k - 1];
+         k--;
+        }
+      tickets[k] = ticket;
+      times[k] = time;
+     }
+   ArrayResize(g_tradeSteps, 0);
+   ArrayResize(g_tradeBefore, 0);
+   double left = volume;
+   for(int i = 0; i <= ArraySize(tickets) && left > 1e-9; i++)
+     {
+      MqlTradeRequest rq;
+      ZeroMemory(rq);
+      rq.action = TRADE_ACTION_DEAL;
+      rq.symbol = sym;
+      rq.type = buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      rq.deviation = InpDeviation;
+      rq.type_filling = Filling(sym);
+      double before = 0;
+      if(i < ArraySize(tickets))
+        {
+         if(!PositionSelectByTicket(tickets[i]))
+           {
+            RejectTrade(id, TRADE_RETCODE_POSITION_CLOSED, "posição mudou; tente novamente", tickets[i]);
+            return;
+           }
+         before = PositionGetDouble(POSITION_VOLUME);
+         rq.position = tickets[i];
+         rq.volume = NormalizeDouble(MathMin(left, before), 8);
+         double rest = NormalizeDouble(before - rq.volume, 8);
+         if(rest > 1e-9 && rest < SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN) - 1e-9)
+           {
+            RejectTrade(id, TRADE_RETCODE_INVALID_VOLUME, "saída deixa volume abaixo do mínimo", rq.position);
+            return;
+           }
+        }
+      else
+        {
+         if(JRaw(j, "reduce_only") == "true")
+           {
+            RejectTrade(id, TRADE_RETCODE_INVALID_CLOSE_VOLUME, "volume maior que a posição");
+            return;
+           }
+         rq.volume = left;
+         rq.sl = NormPrice(sym, JNum(j, "sl"));
+         rq.tp = NormPrice(sym, JNum(j, "tp"));
+        }
+      if(!ValidVolume(sym, rq.volume))
+        {
+         RejectTrade(id, TRADE_RETCODE_INVALID_VOLUME, "volume inválido para a etapa", rq.position);
+         return;
+        }
+      int k = ArraySize(g_tradeSteps);
+      ArrayResize(g_tradeSteps, k + 1);
+      ArrayResize(g_tradeBefore, k + 1);
+      g_tradeSteps[k] = rq;
+      g_tradeBefore[k] = before;
+      left = NormalizeDouble(left - rq.volume, 8);
+     }
+   g_tradeId = id;
+   g_tradeNext = 0;
+   g_tradeRequest = 0;
+   g_tradeAcknowledged = false;
+   g_tradeAbandoned = false;
+   g_tradeTicket = 0;
+   g_tradePrice = 0;
+   g_tradeBusy = true;
+   TradeStep();
   }
 
 void DoOrder(const string j)
@@ -977,7 +1189,26 @@ void DeltaStep()
 void Handle(const string line)
   {
    string t = JStr(line, "t");
-   if(t == "order")
+   if(t == "trade" && (g_tradeBusy || ArraySize(g_reqIds) > 0 || ArraySize(g_tradeQueue) > 0))
+     {
+      int k = ArraySize(g_tradeQueue);
+      if(k >= 32)
+         SendResult(JInt(line, "id"), false, TRADE_RETCODE_TOO_MANY_REQUESTS, "fila de operações cheia", 0, 0);
+      else
+        {
+         ArrayResize(g_tradeQueue, k + 1);
+         g_tradeQueue[k] = line;
+        }
+      return;
+     }
+   if((g_tradeBusy || ArraySize(g_tradeQueue) > 0) && (t == "order" || t == "close" || t == "flatten" || t == "modify"))
+     {
+      SendResult(JInt(line, "id"), false, TRADE_RETCODE_LOCKED, "aguarde a operação em andamento", 0, 0);
+      return;
+     }
+   if(t == "trade")
+      DoTrade(line);
+   else if(t == "order")
       DoOrder(line);
    else if(t == "close")
       ClosePosition(JInt(line, "id"), (ulong)JInt(line, "ticket"));
@@ -1095,6 +1326,7 @@ void OnTimer()
       return;
      }
    ReadCommands();
+   TradeStep();
    // histórico ainda não carregado no terminal: tenta cada pedido por ~10 s
    for(int i = 0; i < ArraySize(g_hSym) && g_sock != INVALID_HANDLE; i++)
      {
@@ -1161,7 +1393,23 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
          if(!ok && result.comment != "")
             msg += ": " + result.comment;
          ulong ticket = result.deal != 0 ? result.deal : result.order;
-         SendResult(g_cliIds[i], ok, result.retcode, msg, ticket, result.price);
+         if(g_tradeBusy && g_tradeRequest == result.request_id)
+           {
+            g_tradeRequest = 0;
+            g_tradeTicket = ticket;
+            g_tradePrice = result.price;
+            if(result.retcode != TRADE_RETCODE_DONE)
+               FinishTrade(ok, result.retcode, msg + "; etapas restantes não enviadas");
+            else if(g_tradeSteps[g_tradeNext].position == 0)
+               FinishTrade(true, result.retcode, msg);
+            else
+              {
+               g_tradeAcknowledged = true;
+               g_tradeDeadline = GetTickCount64() + 2000;
+              }
+           }
+         else
+            SendResult(g_cliIds[i], ok, result.retcode, msg, ticket, result.price);
          ArrayRemove(g_reqIds, i, 1);
          ArrayRemove(g_cliIds, i, 1);
          break;

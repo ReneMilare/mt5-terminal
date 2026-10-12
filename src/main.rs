@@ -494,6 +494,7 @@ impl App {
                         self.status = Some(format!("conta trocada: {server} · {login}"));
                     }
                     self.trading.netting = netting;
+                    self.trading.bridge_version = version;
                     if version < feed::BRIDGE_VERSION {
                         self.status = Some(format!(
                             "EA TerminalBridge desatualizado (v{version}, o app precisa da v{}): remova e anexe de novo no MT5",

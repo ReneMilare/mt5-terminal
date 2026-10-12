@@ -201,6 +201,63 @@ impl Paper {
         result(id, true, 10009, "fechada", ticket, if p.side == Side::Buy { bid } else { ask })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn trade(&mut self, id: u64, symbol: &str, side: Side, volume: f64, sl: f64, tp: f64, reduce_only: bool, (bid, ask): (f64, f64)) -> Message {
+        let grid = |v: f64| (v * 1e8).round() / 1e8;
+        let valid = |v: f64| (VOL_MIN..=VOL_MAX).contains(&v) && (v / VOL_STEP - (v / VOL_STEP).round()).abs() < 1e-6;
+        if !valid(volume) {
+            return result(id, false, 10014, "volume inválido", 0, 0.0);
+        }
+        let opposite: f64 = self.positions.iter().filter(|p| p.symbol == symbol && p.side != side).map(|p| p.volume).sum();
+        if reduce_only && volume > opposite + 1e-9 {
+            return result(id, false, 10038, "volume maior que a posição", 0, 0.0);
+        }
+        let excess = grid((volume - opposite).max(0.0));
+        let fill = if side == Side::Buy { ask } else { bid };
+        let (lo, hi) = if side == Side::Buy { (sl, tp) } else { (tp, sl) };
+        if excess > 0.0 && (!valid(excess) || (lo > 0.0 && lo >= fill) || (hi > 0.0 && hi <= fill)) {
+            return result(id, false, 10016, "volume ou stops inválidos para a entrada", 0, 0.0);
+        }
+        let mut left = volume;
+        // Validate the entire reduction before changing the book.
+        for p in self.positions.iter().filter(|p| p.symbol == symbol && p.side != side) {
+            let take = grid(left.min(p.volume));
+            let rest = grid(p.volume - take);
+            if take > 0.0 && (!valid(take) || (rest > 0.0 && !valid(rest))) {
+                return result(id, false, 10014, "volume inválido para a saída parcial", p.ticket, 0.0);
+            }
+            left = grid(left - take);
+        }
+        self.roll_day(now_secs());
+        left = volume;
+        let mut ticket = 0;
+        let mut i = 0;
+        while i < self.positions.len() && left > 0.0 {
+            let p = &mut self.positions[i];
+            if p.symbol != symbol || p.side == side {
+                i += 1;
+                continue;
+            }
+            let take = grid(left.min(p.volume));
+            let mut closed = p.clone();
+            closed.volume = take;
+            self.balance += floating(&closed, bid, ask);
+            ticket = p.ticket;
+            p.volume = grid(p.volume - take);
+            p.profit = floating(p, bid, ask);
+            left = grid(left - take);
+            if p.volume == 0.0 {
+                self.positions.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        if left > 0.0 {
+            ticket = self.open(symbol, side, left, fill, sl, tp);
+        }
+        result(id, true, 10009, "executada", ticket, fill)
+    }
+
     /// Move a pending order or a position's stops. Stops must be on the losing/winning side of the
     /// reference (entry for orders, the closing quote for positions), as brokers require.
     fn modify(&mut self, id: u64, ticket: u64, price: f64, sl: f64, tp: f64, quote: impl Fn(&str) -> (f64, f64)) -> Message {
@@ -423,6 +480,10 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Feed {
                         let r = paper.order(id, &symbol, side, kind, volume, price, sl, tp, q);
                         std::iter::once(r).chain(paper.state()).collect()
                     }
+                    Command::Trade { id, symbol, side, volume, sl, tp, reduce_only } => {
+                        let r = paper.trade(id, &symbol, side, volume, sl, tp, reduce_only, quote(&symbol));
+                        std::iter::once(r).chain(paper.state()).collect()
+                    }
                     Command::Close { id, ticket } => {
                         let symbols: HashMap<String, (f64, f64)> =
                             paper.positions.iter().map(|p| (p.symbol.clone(), quote(&p.symbol))).collect();
@@ -466,6 +527,55 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> Feed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directional_trades_scale_in_and_out_on_both_sides_without_hedging() {
+        for side in [Side::Buy, Side::Sell] {
+            let opposite = if side == Side::Buy { Side::Sell } else { Side::Buy };
+            let mut p = Paper::new();
+            let q = (100.0, 100.5);
+            let (sl, tp) = if side == Side::Buy { (90.0, 110.0) } else { (110.0, 90.0) };
+            let ok = |m| assert!(matches!(m, Message::TradeResult { ok: true, .. }));
+            ok(p.trade(1, "X", side, 5.0, sl, tp, false, q));
+            let ticket = p.positions[0].ticket;
+            let entry = p.positions[0].price;
+            ok(p.trade(2, "X", opposite, 1.0, 123.0, 456.0, false, q));
+            assert_eq!(p.positions.len(), 1);
+            assert_eq!((p.positions[0].ticket, p.positions[0].volume, p.positions[0].price, p.positions[0].sl, p.positions[0].tp),
+                (ticket, 4.0, entry, sl, tp));
+            // A same-side entry remains possible, then one exit spans both hedge tickets.
+            ok(p.trade(3, "X", side, 2.0, sl, tp, false, q));
+            assert_eq!(p.positions.iter().map(|p| p.volume).sum::<f64>(), 6.0);
+            p.open("Y", opposite, 1.0, 100.0, 0.0, 0.0);
+            let untouched = p.positions.last().unwrap().clone();
+            ok(p.trade(4, "X", opposite, 5.0, 0.0, 0.0, false, q));
+            let remaining: Vec<_> = p.positions.iter().filter(|p| p.symbol == "X").collect();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!((remaining[0].side, remaining[0].volume, remaining[0].sl, remaining[0].tp), (side, 1.0, sl, tp));
+            assert_eq!(p.positions.last().unwrap(), &untouched);
+            ok(p.trade(5, "X", opposite, 1.0, 0.0, 0.0, true, q));
+            assert!(p.positions.iter().all(|p| p.symbol != "X"));
+            assert!((p.balance - (10_000.0 - 7.0 * 0.5 * CONTRACT)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn reduce_only_rejects_excess_and_invalid_volume_without_mutating_the_book() {
+        let mut p = Paper::new();
+        let q = (100.0, 100.5);
+        p.trade(1, "X", Side::Buy, 5.0, 90.0, 110.0, false, q);
+        let before = p.positions.clone();
+        let balance = p.balance;
+        for (symbol, side, volume) in [("X", Side::Sell, 6.0), ("Y", Side::Sell, 1.0),
+            ("X", Side::Buy, 1.0), ("X", Side::Sell, 0.015), ("X", Side::Sell, f64::NAN)] {
+            assert!(matches!(p.trade(2, symbol, side, volume, 0.0, 0.0, true, q), Message::TradeResult { ok: false, .. }));
+            assert_eq!(p.positions, before);
+            assert_eq!(p.balance, balance);
+        }
+        assert!(matches!(p.trade(3, "X", Side::Sell, 6.0, 110.0, 90.0, false, q), Message::TradeResult { ok: true, .. }));
+        assert_eq!(p.positions.len(), 1);
+        assert_eq!((p.positions[0].side, p.positions[0].volume), (Side::Sell, 1.0));
+    }
 
     #[test]
     fn paper_daily_result_separates_closed_and_open_and_resets_at_midnight() {

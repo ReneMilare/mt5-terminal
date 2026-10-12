@@ -25,6 +25,10 @@ TCP and relays quotes, history, positions and orders.
   on the order that follows your pointer.
 - **A full order ticket.** Market, limit and stop orders, flatten, reverse (netting and hedging),
   breakeven, and keyboard shortcuts.
+- **Scale in and out.** Market buy/sell reduces opposite positions before opening any excess,
+  on both netting and hedging accounts: buy 5, sell 1 → keep 4. The **REDUZIR** button exits with
+  the ticket's volume and never reverses; the remaining position keeps its stop and target.
+  Requires TerminalBridge v10. Limit and stop orders remain new pending orders.
 - **Daily account result.** The ticket shows today's realized result including costs, current floating
   result and their total in account currency, across all symbols. The broker's server day determines
   the cutoff; deposits and withdrawals are excluded. The total stays in the status bar when the ticket

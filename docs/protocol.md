@@ -14,6 +14,7 @@ horários são do servidor do MT5 (barras em segundos, ticks em milissegundos).
 | `history` | `symbol`, `tf` (`M1`…`D1`, `W1`), `count` | Envia `symbol` e `bars`. Pedidos ficam numa fila; os que o terminal ainda carrega são tentados por ~10 s |
 | `subscribe` | `symbols: [..]` | Substitui a lista de símbolos cujos ticks são transmitidos |
 | `order` | `id`, `symbol`, `side` (`buy`/`sell`), `kind` (`market`/`limit`/`stop`), `volume`, `price`, `sl`, `tp` | Nova ordem; `price` só vale para limite/stop; `sl`/`tp` = 0 é sem |
+| `trade` (v10) | `id`, `symbol`, `side`, `volume`, `sl`, `tp`, `reduce_only` | Operação a mercado: fecha primeiro posições opostas, das mais antigas às mais novas, por ticket; só o excedente abre posição. `reduce_only: true` rejeita volume acima da exposição oposta e nunca abre posição. Stops/alvos enviados só valem para a entrada; as saídas preservam os existentes |
 | `close` | `id`, `ticket` | Fecha a posição inteira a mercado |
 | `cancel` | `id`, `ticket` | Remove a ordem pendente |
 | `flatten` | `id`, `symbol` | Cancela as ordens e fecha as posições do símbolo, de qualquer origem |
@@ -62,6 +63,13 @@ No Sintético, o dia usa UTC.
 
 - Ordens saem por `OrderSendAsync`: o EA não bloqueia esperando a corretora; o resultado chega em
   `OnTradeTransaction` (`TRADE_TRANSACTION_REQUEST`) e vira `trade_result`.
+- `trade` valida os volumes antes de enviar e executa uma etapa por vez, esperando a confirmação da
+  corretora e do volume restante antes de continuar. Falha, execução parcial, mudança da posição ou
+  desconexão interrompem as etapas restantes, sem reenvio automático. Operações direcionais consecutivas
+  ficam numa fila de até 32 pedidos, cada uma planejada com o estado confirmado da anterior; falha,
+  execução parcial ou desconexão descartam a fila. Enquanto a fila opera, novas ordens `order`, fechamentos e modificações são bloqueados;
+  cancelamentos continuam disponíveis. Em hedge, as saídas usam `MqlTradeRequest.position`; em netting, também preservam o
+  stop/alvo restante. O app trava operações com EA anterior à v10.
 - Preenchimento pelo que o símbolo aceita: FOK, senão IOC, senão RETURN.
 - Ordens do app levam o número mágico `InpMagic` (47011) e o comentário `mt5-terminal`.
 - Ticks: `CopyTicks` a cada `InpTimerMs` (10 ms) e em `OnTick`, desde o último enviado de cada símbolo.

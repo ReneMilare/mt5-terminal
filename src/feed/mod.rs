@@ -40,6 +40,9 @@ pub enum Command {
         #[serde(default)]
         tp: f64,
     },
+    /// Market trade: close opposite positions first, then open any excess (v10).
+    /// With `reduce_only`, reject volumes above the opposite exposure; never open a position.
+    Trade { id: u64, symbol: String, side: Side, volume: f64, sl: f64, tp: f64, reduce_only: bool },
     /// Close a whole position at market.
     Close { id: u64, ticket: u64 },
     /// Delete a pending order.
@@ -239,7 +242,7 @@ pub enum Message {
 
 /// Protocol version this app speaks; older EAs lack the delta's `skip` (v9), monetary tick values (v8), the daily result (v7), POC per bar (v6), the delta (v5), modify + netting flag (v4), paged history (v3),
 /// the history queue and probes (v2).
-pub const BRIDGE_VERSION: u32 = 9;
+pub const BRIDGE_VERSION: u32 = 10;
 
 fn is_zero(v: &f64) -> bool {
     *v == 0.0
@@ -317,6 +320,9 @@ mod tests {
 
     #[test]
     fn trade_wire_format() {
+        let trade = Command::Trade { id: 9, symbol: "X".into(), side: Side::Sell, volume: 1.0, sl: 0.0, tp: 0.0, reduce_only: true };
+        assert_eq!(serde_json::to_string(&trade).unwrap(),
+            r#"{"t":"trade","id":9,"symbol":"X","side":"sell","volume":1.0,"sl":0.0,"tp":0.0,"reduce_only":true}"#);
         let cmd = Command::Order {
             id: 7,
             symbol: "UsaTec".into(),
