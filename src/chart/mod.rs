@@ -309,6 +309,8 @@ pub struct ChartData<'a> {
     pub ribbon: Option<Ribbon<'a>>,
     /// The indicators' line under the legend.
     pub legend: &'a [crate::studies::LegendItem],
+    /// Current indicator summaries, separate from historical candle values.
+    pub panels: &'a [StudyPanel],
     /// Editable indicators (key, name), listed in the context menu.
     pub studies: &'a [(&'static str, &'static str)],
     /// The active chart (of several side by side): the keyboard moves it even without the pointer over it.
@@ -419,6 +421,7 @@ pub struct Overlay<'a> {
     pub dotted: bool,
 }
 
+#[derive(Clone)]
 pub struct MapLevel {
     pub study: &'static str,
     pub price: f64,
@@ -430,6 +433,27 @@ pub struct MapLevel {
     pub text: String,
     /// Complete sources, even when the on-chart label is shortened.
     pub details: String,
+}
+
+/// A compact current-data card supplied by a study. The core owns only its presentation.
+#[derive(Clone)]
+pub struct StudyPanel {
+    pub study: &'static str,
+    pub lines: Vec<String>,
+    /// Short summary when charts share a small viewport; details remain in the tooltip.
+    pub compact: Vec<String>,
+    pub details: String,
+    pub color: Color32,
+}
+
+fn panel_lines(plot: Rect, panel: &StudyPanel) -> &[String] {
+    if (plot.height() < 280.0 || plot.width() < 360.0) && !panel.compact.is_empty() { &panel.compact } else { &panel.lines }
+}
+
+fn panel_rect(plot: Rect, panel: &StudyPanel, top: f32) -> Rect {
+    let lines = panel_lines(plot, panel);
+    let width = lines.iter().map(|s| s.chars().count()).max().unwrap_or(0) as f32 * 7.3 + 16.0;
+    Rect::from_min_size(Pos2::new(plot.left() + 12.0, top), Vec2::new(width.min((plot.width() - 24.0).max(0.0)), lines.len() as f32 * 16.0 + 12.0))
 }
 
 /// One strip of the pane: a class per bar (`u8::MAX` = nothing) and the color of each class.
@@ -1133,6 +1157,7 @@ impl ChartView {
                         }
                         let start = bars.partition_point(|b| b.time < m.from);
                         let x0 = f.x(start as f64).max(plot.left());
+                        if x0 >= plot.right() { continue; }
                         let stroke = Stroke::new(m.width, m.color);
                         let line = [Pos2::new(x0, y), Pos2::new(plot.right(), y)];
                         if m.dashed {
@@ -1360,6 +1385,17 @@ impl ChartView {
 
         let li = hovered_bar.map(|(_, i)| i).unwrap_or(n - 1);
         self.legend(&painter, plot, data, li, pal);
+        let mut top = plot.top() + 80.0;
+        for panel in data.panels {
+            let rect = panel_rect(plot, panel, top);
+            let painter = painter.with_clip_rect(rect.intersect(plot));
+            painter.rect_filled(rect, CornerRadius::same(4), pal.chart_bg);
+            for (row, line) in panel_lines(plot, panel).iter().enumerate() {
+                painter.text(rect.min + Vec2::new(8.0, 6.0 + row as f32 * 16.0), Align2::LEFT_TOP, line, FontId::monospace(12.0), panel.color);
+            }
+            ui.interact(rect.intersect(plot), ui.id().with(("study_panel", panel.study)), egui::Sense::hover()).on_hover_text(&panel.details);
+            top = rect.bottom() + 6.0;
+        }
         if let Some(m) = self.measurement {
             draw_measurement(&plot_painter, &f, m, digits, pal);
         }
@@ -1677,6 +1713,14 @@ fn study_at(f: &Frame, data: &ChartData, p: Pos2, pane: Option<Rect>, vol_top: f
     if !f.plot.contains(p) {
         return None;
     }
+    let mut top = f.plot.top() + 80.0;
+    for panel in data.panels {
+        let rect = panel_rect(f.plot, panel, top);
+        if rect.contains(p) {
+            return Some(panel.study);
+        }
+        top = rect.bottom() + 6.0;
+    }
     if let Some(r) = &data.ribbon
         && p.y >= ribbon_top
     {
@@ -1817,7 +1861,7 @@ mod tests {
             levels, overlays: &[], map_levels: &[], pane: None, pane_open: false,
             layers: &Layer::DEFAULT, quote: Some((100.0, 100.25)), can_trade: true, cursor,
             tick: 0.25, order_volume: "1", bracket: None, volume: None, marks: None,
-            shading: None, ribbon: None, legend: &[], studies: &[], active: true,
+            shading: None, ribbon: None, legend: &[], panels: &[], studies: &[], active: true,
         }
     }
 
@@ -2076,7 +2120,7 @@ mod tests {
                 series, symbol: "X", tf: Timeframe::M5, server_now: None,
                 levels: &[], overlays: &[], map_levels: &[], pane: None, pane_open: false,
                 layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor: CursorMode::Hand,
-                tick: 0.0, order_volume: "1", bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &[], active: true,
+                tick: 0.0, order_volume: "1", bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], panels: &[], studies: &[], active: true,
             }
         }
         let ctx = egui::Context::default();
@@ -2116,7 +2160,7 @@ mod tests {
                 series: &series, symbol: "X", tf: Timeframe::M5, server_now: None,
                 levels: &[], overlays: &[], map_levels: &[], pane: None, pane_open: false,
                 layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor, tick: 0.0,
-                order_volume: "1", bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &[], active: true,
+                order_volume: "1", bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], panels: &[], studies: &[], active: true,
             };
             let ctx = egui::Context::default();
             let mut view = ChartView::default();
@@ -2176,7 +2220,7 @@ mod tests {
             levels: &[], overlays: &[], map_levels: &[], pane: None, pane_open: false,
             layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor: CursorMode::Hand,
             tick: 0.0, order_volume: "1", bracket: None, volume: None, marks: None,
-            shading: None, ribbon: None, legend: &[], studies: &[], active: true,
+            shading: None, ribbon: None, legend: &[], panels: &[], studies: &[], active: true,
         };
         let ctx = egui::Context::default();
         let mut view = ChartView::default();
@@ -2263,7 +2307,7 @@ mod tests {
             levels: &levels, overlays: &[], map_levels: &[], pane: None, pane_open: false,
             layers: &[Layer::Levels, Layer::Indicators, Layer::Price, Layer::Trades],
             quote: Some((100.0, 100.25)), can_trade: false, cursor: CursorMode::Hand, tick: 0.25, order_volume: "1",
-            bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &[], active: true,
+            bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], panels: &[], studies: &[], active: true,
         };
         let ctx = egui::Context::default();
         let mut view = ChartView::default();
@@ -2301,11 +2345,12 @@ mod tests {
         let classes: Vec<u8> = (0..100).map(|i| if i >= 80 { 0 } else { u8::MAX }).collect();
         let strip = || Strip { classes: &[], palette: &[], level: 1.0 };
         let pane = Pane { study: "pane", strips: [strip(), strip(), strip()], lines: &[], boxed: &[] };
+        let panels = [StudyPanel { study: "summary", lines: vec!["Current data".into()], compact: Vec::new(), details: "Source and timestamp".into(), color: Color32::WHITE }];
         let data = ChartData {
             series: &series, symbol: "X", tf: Timeframe::M5, server_now: None,
             levels: &[], overlays: &overlays, map_levels: &map_levels, pane: Some(&pane), pane_open: true,
             layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor: CursorMode::Hand, tick: 0.0, order_volume: "1",
-            bracket: None, volume: None, marks: None, legend: &[], studies: &[], active: true, ribbon: None,
+            bracket: None, volume: None, marks: None, legend: &[], panels: &panels, studies: &[], active: true, ribbon: None,
             shading: Some(Shading { study: "tint", classes: &classes, palette: &[Color32::GREEN] }),
         };
         let plot = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 400.0));
@@ -2319,41 +2364,47 @@ mod tests {
         assert_eq!(hit(at(40.0, 105.0)), None, "a level starts at its bar");
         assert_eq!(hit(at(90.0, 95.0)), Some("tint"), "the tint behind the bar, away from the lines");
         assert_eq!(hit(Pos2::new(500.0, 450.0)), Some("pane"));
+        assert_eq!(hit(Pos2::new(25.0, 90.0)), Some("summary"), "current panel has its own study editor");
     }
 
     #[test]
-    fn right_click_on_a_line_offers_to_edit_its_indicator() {
-        let series = Series::new((0..100).map(|i| Bar { time: i * 300, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }).collect(), 2);
-        let line = vec![100.5; 100];
-        let overlays = [Overlay { study: "line", values: &line, shade: None, palette: &[Color32::WHITE], width: 2.0, dotted: false }];
-        let studies = [("line", "Linha X"), ("other", "Outro")];
-        let data = ChartData {
-            series: &series, symbol: "X", tf: Timeframe::M5, server_now: None,
-            levels: &[], overlays: &overlays, map_levels: &[], pane: None, pane_open: false,
-            layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor: CursorMode::Hand, tick: 0.0, order_volume: "1",
-            bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], studies: &studies, active: true,
-        };
-        let ctx = egui::Context::default();
-        let mut view = ChartView { bar_px: 6.0, ..Default::default() };
-        chart_frame(&ctx, &mut view, &data, vec![]);
-        // where the line is drawn at bar 80
-        let plot = Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0 - PRICE_AXIS_W, 600.0 - TIME_AXIS_H));
-        let f = Frame { plot, right: view.right, bar_px: view.bar_px, lo: view.y_lo, hi: view.y_hi, ppp: 1.0 };
-        let at = Pos2::new(f.x(80.0), f.y(100.5));
-        let secondary = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() };
-        chart_frame(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(at), secondary(true)]);
-        chart_frame(&ctx, &mut view, &data, vec![secondary(false)]);
-        assert_eq!(view.menu_study, Some("line"));
-        let output = chart_frame(&ctx, &mut view, &data, vec![]);
-        let texts: Vec<(String, Rect)> = output.shapes.iter().filter_map(|s| match &s.shape {
-            Shape::Text(t) => Some((t.galley.job.text.clone(), t.visual_bounding_rect())),
-            _ => None,
-        }).collect();
-        let edit = texts.iter().find(|(t, _)| t == "Editar Linha X…").map(|(_, r)| r.center()).expect("menu item to edit the line");
-        assert!(texts.iter().any(|(t, _)| t == "Indicadores"), "every indicator is listed too");
-        assert!(!texts.iter().any(|(t, _)| t.starts_with("Compra")), "no orders while trading is locked");
-        chart_frame(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(edit), pointer_button(edit, true)]);
-        chart_frame(&ctx, &mut view, &data, vec![pointer_button(edit, false)]);
-        assert_eq!(view.actions, vec![ChartAction::EditStudy("line")]);
+    fn right_click_on_a_line_or_panel_offers_to_edit_its_indicator() {
+        for panel in [false, true] {
+            let series = Series::new((0..100).map(|i| Bar { time: i * 300, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 }).collect(), 2);
+            let line = vec![100.5; 100];
+            let overlays = [Overlay { study: "line", values: &line, shade: None, palette: &[Color32::WHITE], width: 2.0, dotted: false }];
+            let studies = [("line", "Linha X"), ("summary", "Resumo X"), ("other", "Outro")];
+            let panels = [StudyPanel { study: "summary", lines: vec!["Current data".into()], compact: Vec::new(), details: "Source".into(), color: Color32::WHITE }];
+            let key = if panel { "summary" } else { "line" };
+            let data = ChartData {
+                series: &series, symbol: "X", tf: Timeframe::M5, server_now: None,
+                levels: &[], overlays: &overlays, map_levels: &[], pane: None, pane_open: false,
+                layers: &Layer::DEFAULT, quote: None, can_trade: false, cursor: CursorMode::Hand, tick: 0.0, order_volume: "1",
+                bracket: None, volume: None, marks: None, shading: None, ribbon: None, legend: &[], panels: if panel { &panels } else { &[] }, studies: &studies, active: true,
+            };
+            let ctx = egui::Context::default();
+            let mut view = ChartView { bar_px: 6.0, ..Default::default() };
+            chart_frame(&ctx, &mut view, &data, vec![]);
+            // where the line is drawn at bar 80
+            let plot = Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0 - PRICE_AXIS_W, 600.0 - TIME_AXIS_H));
+            let f = Frame { plot, right: view.right, bar_px: view.bar_px, lo: view.y_lo, hi: view.y_hi, ppp: 1.0 };
+            let at = if panel { Pos2::new(25.0, 90.0) } else { Pos2::new(f.x(80.0), f.y(100.5)) };
+            let secondary = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() };
+            chart_frame(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(at), secondary(true)]);
+            chart_frame(&ctx, &mut view, &data, vec![secondary(false)]);
+            assert_eq!(view.menu_study, Some(key));
+            let output = chart_frame(&ctx, &mut view, &data, vec![]);
+            let texts: Vec<(String, Rect)> = output.shapes.iter().filter_map(|s| match &s.shape {
+                Shape::Text(t) => Some((t.galley.job.text.clone(), t.visual_bounding_rect())),
+                _ => None,
+            }).collect();
+            let title = if panel { "Editar Resumo X…" } else { "Editar Linha X…" };
+            let edit = texts.iter().find(|(t, _)| t == title).map(|(_, r)| r.center()).expect("menu item to edit the line");
+            assert!(texts.iter().any(|(t, _)| t == "Indicadores"), "every indicator is listed too");
+            assert!(!texts.iter().any(|(t, _)| t.starts_with("Compra")), "no orders while trading is locked");
+            chart_frame(&ctx, &mut view, &data, vec![egui::Event::PointerMoved(edit), pointer_button(edit, true)]);
+            chart_frame(&ctx, &mut view, &data, vec![pointer_button(edit, false)]);
+            assert_eq!(view.actions, vec![ChartAction::EditStudy(key)]);
+        }
     }
 }

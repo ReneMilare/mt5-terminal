@@ -848,6 +848,7 @@ impl App {
             "cursor": self.settings.chart.cursor.key(),
             "auto_scale": pane.view.auto_scale(),
             "fibonacci": pane.studies.fibonacci_state(),
+            "options": pane.studies.options_state(),
             "indicators": pane.studies.params().iter().map(|p| p.state()).collect::<Vec<_>>(),
             "positions": self.trading.positions.len(),
             "orders": self.trading.orders.len(),
@@ -1459,11 +1460,11 @@ impl App {
                 let active = i == self.active;
                 let trade = can_trade && active;
                 let positions = self.trading.levels(&p.symbol, &self.pal, trade);
-                let (overlays, map_levels, pane, volume, marks, shading, ribbon, legend) = if show {
+                let (overlays, map_levels, pane, volume, marks, shading, ribbon, legend, panels) = if show {
                     let s = &p.studies;
-                    (s.overlays(), s.map_levels(), s.pane(), s.volume(), s.marks(), s.shading(), s.ribbon(), s.legend())
+                    (s.overlays(), s.map_levels(), s.pane(), s.volume(), s.marks(), s.shading(), s.ribbon(), s.legend(), s.panels())
                 } else {
-                    (Vec::new(), Vec::new(), None, None, None, None, None, Vec::new())
+                    (Vec::new(), Vec::new(), None, None, None, None, None, Vec::new(), Vec::new())
                 };
                 let study_names: Vec<(&'static str, &'static str)> =
                     if show { p.studies.params().iter().map(|p| (p.key, p.name)).collect() } else { Vec::new() };
@@ -1490,6 +1491,7 @@ impl App {
                     shading,
                     ribbon,
                     legend: &legend,
+                    panels: &panels,
                     studies: &study_names,
                     active,
                 };

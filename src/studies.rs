@@ -313,6 +313,10 @@ mod none {
             false
         }
 
+        pub fn options_state(&self) -> serde_json::Value { serde_json::Value::Null }
+
+        pub fn panels(&self) -> Vec<crate::chart::StudyPanel> { Vec::new() }
+
         pub fn fibonacci_state(&self) -> serde_json::Value {
             serde_json::json!({"enabled": false, "timeframes": []})
         }

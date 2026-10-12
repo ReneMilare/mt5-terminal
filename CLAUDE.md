@@ -45,6 +45,7 @@ por isso antes de qualquer outra coisa.
   ou painel de um indicador → "Editar …" (ou o submenu Indicadores); a janela aplica na hora e grava só o
   que difere do padrão em `[studies.<indicador>]` (`studies::StudyParams`, opções declaradas pelo preset).
   Cada elemento desenhado leva a chave do indicador (`study`) para o clique direito (`chart::study_at`).
+  Resumos atuais independentes do rodapé usam `Studies::panels` (`StudyPanel`), com tooltip e versão compacta para gráficos pequenos.
   O preset também pode pintar o fundo por candle (`Shading`), desenhar faixas finas na base do gráfico
   (`Ribbon`, uma classe por candle em cada linha; o volume sobe para ficar em cima delas) e pôr uma linha
   de estado sob a legenda.
