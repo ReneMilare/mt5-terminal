@@ -186,6 +186,11 @@ impl StudyParams {
         self.params.iter().filter(|p| p.value != p.default).map(|p| (p.key.to_string(), p.write())).collect()
     }
 
+    /// A saved preset includes defaults too, so later edits can restore every option.
+    pub fn all_values(&self) -> toml::Table {
+        self.params.iter().map(|p| (p.key.to_string(), p.write())).collect()
+    }
+
     /// Every option and its value, for `ctl state`.
     pub fn state(&self) -> serde_json::Value {
         let values: serde_json::Map<String, serde_json::Value> = self
@@ -315,6 +320,8 @@ mod none {
 
         pub fn options_state(&self) -> serde_json::Value { serde_json::Value::Null }
 
+        pub fn poc_state(&self) -> serde_json::Value { serde_json::Value::Null }
+
         pub fn panels(&self) -> Vec<crate::chart::StudyPanel> { Vec::new() }
 
         pub fn fibonacci_state(&self) -> serde_json::Value {
@@ -440,5 +447,19 @@ mod tests {
         assert_eq!(invalid.len(), 3, "{invalid:?}");
         assert_eq!(s.choice("mode"), "a");
         assert!(s.to_table().is_empty(), "back to the defaults");
+    }
+
+    #[test]
+    fn snapshot_restores_default_values_after_experimenting() {
+        let original = study();
+        let saved = original.all_values();
+        assert!(original.to_table().is_empty());
+        assert_eq!(saved.len(), original.params.len());
+        let mut edited = original.clone();
+        edited.load(&"[line]\nvisible = false\nwidth = 4\nwindow = 200\nmode = 'b'\ntfs = ['H1']".parse().unwrap());
+        assert_ne!(edited.all_values(), saved);
+        let (_, invalid) = edited.load(&toml::Table::from_iter([("line".into(), toml::Value::Table(saved.clone()))]));
+        assert!(invalid.is_empty());
+        assert_eq!(edited.all_values(), saved, "restore defaults, choices, colors and timeframes as well as numbers");
     }
 }

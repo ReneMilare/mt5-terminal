@@ -94,6 +94,9 @@ struct App {
     /// Indicator whose options are open (right click on it), and the text of its Fibonacci levels.
     study_open: Option<&'static str>,
     study_dirty: bool,
+    study_preset_key: Option<&'static str>,
+    study_preset_selected: String,
+    study_preset_name: String,
     fib_levels: String,
     /// Account switch waiting for confirmation (switching to a real account asks first).
     confirm_switch: Option<settings::Account>,
@@ -165,6 +168,9 @@ impl App {
             presets_dirty: false,
             study_open: None,
             study_dirty: false,
+            study_preset_key: None,
+            study_preset_selected: String::new(),
+            study_preset_name: String::new(),
             fib_levels: String::new(),
             confirm_switch: None,
             switching: None,
@@ -615,7 +621,8 @@ impl App {
                 self.settings.save_ui();
             }
             ui.menu_button("Camadas", |ui| self.layers_menu(ui));
-            if ui.selectable_label(self.colors_open, "Cores").on_hover_text("Cores do app e dos candles").clicked() {
+            ui.menu_button("Tema", |ui| self.theme_menu(ui)).response.on_hover_text("Trocar tema visual (F7 para alternar direto, F8 para Cores)");
+            if ui.selectable_label(self.colors_open, "Cores").on_hover_text("Cores do app e dos candles (F8)").clicked() {
                 self.colors_open = !self.colors_open;
             }
 
@@ -849,7 +856,9 @@ impl App {
             "auto_scale": pane.view.auto_scale(),
             "fibonacci": pane.studies.fibonacci_state(),
             "options": pane.studies.options_state(),
+            "poc": pane.studies.poc_state(),
             "indicators": pane.studies.params().iter().map(|p| p.state()).collect::<Vec<_>>(),
+            "study_presets": self.settings.study_presets.iter().map(|p| serde_json::json!({"key": p.key, "name": p.name})).collect::<Vec<_>>(),
             "positions": self.trading.positions.len(),
             "orders": self.trading.orders.len(),
             "daily_result": self.trading.day_result.as_ref().map(|day| serde_json::json!({
@@ -886,9 +895,10 @@ impl App {
         egui::Window::new("Cores").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
             ui.label(RichText::new("Predefinições").color(self.pal.text_dim).size(12.0));
             ui.horizontal_wrapped(|ui| {
-                for (name, colors) in settings::presets() {
-                    if ui.button(name).clicked() {
-                        self.settings.colors = colors;
+                for theme in settings::THEME_PRESETS {
+                    let active = self.settings.colors.matches_preset(theme);
+                    if ui.selectable_label(active, theme.name).on_hover_text(theme.description).clicked() {
+                        self.settings.colors = theme.to_colors();
                         changed = true;
                     }
                 }
@@ -931,6 +941,72 @@ impl App {
         }
     }
 
+    /// Fast visual theme selector menu with preview swatches.
+    fn theme_menu(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Temas visuais").color(self.pal.text_dim).size(11.5));
+        let ctx = ui.ctx().clone();
+        let mut chosen = None;
+
+        for theme in settings::THEME_PRESETS {
+            let active = self.settings.colors.matches_preset(theme);
+            ui.horizontal(|ui| {
+                // Mini preview swatch: [bg][border][up][down]
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 14.0), egui::Sense::hover());
+                let p = ui.painter();
+                p.rect_filled(rect, 2.0, theme.bg_color());
+                p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, theme.panel_color()), egui::StrokeKind::Inside);
+
+                let dot_up = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 2.5), egui::vec2(6.0, 9.0));
+                p.rect_filled(dot_up, 1.0, theme.up_color());
+
+                let dot_down = egui::Rect::from_min_size(rect.min + egui::vec2(19.0, 2.5), egui::vec2(6.0, 9.0));
+                p.rect_filled(dot_down, 1.0, theme.down_color());
+
+                let btn = ui.selectable_label(active, theme.name);
+                if btn.on_hover_text(theme.description).clicked() {
+                    chosen = Some((theme.name, theme.to_colors()));
+                    ui.close();
+                }
+            });
+        }
+
+        ui.separator();
+        ui.label(RichText::new("Atalhos rápidos:\nF7: alternar para o próximo tema\nF8: janela de personalização de cores").color(self.pal.text_dim).size(11.0));
+        ui.separator();
+        if ui.button("Personalizar cores… (F8)").clicked() {
+            self.colors_open = true;
+            ui.close();
+        }
+
+        if let Some((name, colors)) = chosen {
+            self.set_theme(colors, name, &ctx);
+        }
+    }
+
+    fn set_theme(&mut self, colors: settings::Colors, name: &str, ctx: &egui::Context) {
+        self.settings.colors = colors;
+        self.pal = self.settings.palette();
+        theme::apply(ctx, &self.pal);
+        if let Err(e) = settings::save_colors(&self.settings.colors) {
+            self.status = Some(format!("não gravou as cores: {e}"));
+        } else {
+            self.status = Some(format!("Tema: {name}"));
+        }
+        self.config_mtime = settings::mtime();
+        self.colors_dirty = false;
+    }
+
+    fn cycle_theme(&mut self, ctx: &egui::Context) {
+        let presets = settings::THEME_PRESETS;
+        let current_idx = presets.iter().position(|p| self.settings.colors.matches_preset(p));
+        let next_idx = match current_idx {
+            Some(i) => (i + 1) % presets.len(),
+            None => 0,
+        };
+        let theme = &presets[next_idx];
+        self.set_theme(theme.to_colors(), theme.name, ctx);
+    }
+
     /// The options of one indicator (right click on it in the chart): applied live, written to
     /// `[studies.<key>]` once the mouse is released (not on every step of a drag).
     fn study_window(&mut self, ctx: &egui::Context) {
@@ -939,6 +1015,11 @@ impl App {
             self.study_open = None;
             return;
         };
+        if self.study_preset_key != Some(key) {
+            self.study_preset_key = Some(key);
+            self.study_preset_selected = self.settings.study_presets.iter().find(|p| p.key == key).map(|p| p.name.clone()).unwrap_or_default();
+            self.study_preset_name.clear();
+        }
         if self.fib_levels.is_empty() {
             self.fib_levels = fib_text(&self.settings.fibonacci.levels);
         }
@@ -948,37 +1029,43 @@ impl App {
         let mut fib_changed = false;
         let mut fib_error = None;
         egui::Window::new(params.name).id(egui::Id::new(("study", key))).open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
-            changed = params.edit_ui(ui);
-            if params.fibonacci {
-                ui.add_space(6.0);
-                ui.label(RichText::new("Fibonacci (M5, M15, H1, D1)").strong());
-                egui::Grid::new("fibonacci").num_columns(2).min_col_width(170.0).spacing([16.0, 6.0]).show(ui, |ui| {
-                    ui.label("Ligado");
-                    fib_changed |= ui.checkbox(&mut fib.enabled, "").changed();
-                    ui.end_row();
-                    ui.label("Busca (candles fechados)");
-                    fib_changed |= ui.add(egui::DragValue::new(&mut fib.lookback).range(20..=2000)).changed();
-                    ui.end_row();
-                    ui.label("Candles que confirmam o pivô");
-                    fib_changed |= ui.add(egui::DragValue::new(&mut fib.pivot_bars).range(1..=10)).changed();
-                    ui.end_row();
-                    ui.label("Retrações");
-                    let edit = ui.add(egui::TextEdit::singleline(&mut self.fib_levels).desired_width(180.0));
-                    if edit.lost_focus() {
-                        let parsed: Result<Vec<f64>, _> =
-                            self.fib_levels.split([',', ';', ' ']).filter(|t| !t.is_empty()).map(|t| t.parse::<f64>()).collect();
-                        match parsed {
-                            Ok(levels) if levels != fib.levels => {
-                                fib.levels = levels;
-                                fib_changed = true;
-                            }
-                            Ok(_) => {}
-                            Err(_) => fib_error = Some("retrações: números separados por vírgula, ex.: 0.382, 0.5, 0.618".to_string()),
-                        }
-                    }
-                    ui.end_row();
-                });
+            if key == "kalman" {
+                changed |= self.study_preset_ui(ui, &mut params);
+                ui.separator();
             }
+            egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 260.0).max(200.0)).show(ui, |ui| {
+                changed |= params.edit_ui(ui);
+                if params.fibonacci {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Fibonacci (M5, M15, H1, D1)").strong());
+                    egui::Grid::new("fibonacci").num_columns(2).min_col_width(170.0).spacing([16.0, 6.0]).show(ui, |ui| {
+                        ui.label("Ligado");
+                        fib_changed |= ui.checkbox(&mut fib.enabled, "").changed();
+                        ui.end_row();
+                        ui.label("Busca (candles fechados)");
+                        fib_changed |= ui.add(egui::DragValue::new(&mut fib.lookback).range(20..=2000)).changed();
+                        ui.end_row();
+                        ui.label("Candles que confirmam o pivô");
+                        fib_changed |= ui.add(egui::DragValue::new(&mut fib.pivot_bars).range(1..=10)).changed();
+                        ui.end_row();
+                        ui.label("Retrações");
+                        let edit = ui.add(egui::TextEdit::singleline(&mut self.fib_levels).desired_width(180.0));
+                        if edit.lost_focus() {
+                            let parsed: Result<Vec<f64>, _> =
+                                self.fib_levels.split([',', ';', ' ']).filter(|t| !t.is_empty()).map(|t| t.parse::<f64>()).collect();
+                            match parsed {
+                                Ok(levels) if levels != fib.levels => {
+                                    fib.levels = levels;
+                                    fib_changed = true;
+                                }
+                                Ok(_) => {}
+                                Err(_) => fib_error = Some("retrações: números separados por vírgula, ex.: 0.382, 0.5, 0.618".to_string()),
+                            }
+                        }
+                        ui.end_row();
+                    });
+                }
+            });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 reset = ui.button("Padrão").on_hover_text("Volta todas as opções deste indicador ao padrão").clicked();
@@ -1043,7 +1130,57 @@ impl App {
         }
         if !open {
             self.study_open = None;
+            self.study_preset_key = None;
         }
+    }
+
+    /// Named Kalman snapshots remain separate from the values being edited.
+    fn study_preset_ui(&mut self, ui: &mut egui::Ui, params: &mut studies::StudyParams) -> bool {
+        let mut changed = false;
+        ui.label(RichText::new("Predefinições salvas").strong());
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt(("study_preset", params.key))
+                .width(250.0)
+                .selected_text(if self.study_preset_selected.is_empty() { "Nenhuma salva" } else { &self.study_preset_selected })
+                .show_ui(ui, |ui| {
+                    for preset in self.settings.study_presets.iter().filter(|p| p.key == params.key) {
+                        ui.selectable_value(&mut self.study_preset_selected, preset.name.clone(), &preset.name);
+                    }
+                });
+            let selected = self.settings.study_presets.iter().find(|p| p.key == params.key && p.name == self.study_preset_selected);
+            if ui.add_enabled(selected.is_some(), egui::Button::new("Aplicar")).on_hover_text("Restaura as opções salvas deste indicador").clicked()
+                && let Some(preset) = selected
+            {
+                let mut restored = params.clone();
+                let (_, invalid) = restored.load(&toml::Table::from_iter([(params.key.to_string(), toml::Value::Table(preset.values.clone()))]));
+                if invalid.is_empty() {
+                    *params = restored;
+                    changed = true;
+                    self.status = Some(format!("Kalman: {}", preset.name));
+                } else {
+                    self.status = Some(format!("predefinição incompatível: {}", invalid.join("; ")));
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.study_preset_name).hint_text("Nome para salvar os ajustes atuais").desired_width(250.0));
+            let name = self.study_preset_name.trim();
+            let exists = self.settings.study_presets.iter().any(|p| p.key == params.key && p.name == name);
+            let label = if exists { "Atualizar" } else { "Salvar como" };
+            if ui.add_enabled(!name.is_empty(), egui::Button::new(label)).clicked() {
+                match settings::save_study_preset(params.key, name, &params.all_values()) {
+                    Ok(presets) => {
+                        self.settings.study_presets = presets;
+                        self.study_preset_selected = name.to_string();
+                        self.status = Some(format!("predefinição salva: {name}"));
+                        self.config_mtime = settings::mtime();
+                        self.study_preset_name.clear();
+                    }
+                    Err(e) => self.status = Some(format!("não salvou a predefinição: {e}")),
+                }
+            }
+        });
+        changed
     }
 
     fn save_ui_state(&mut self) {
@@ -1320,6 +1457,14 @@ impl App {
         self.watch_config();
         self.serve_control();
         let ctx = ui.ctx().clone();
+        if !ctx.egui_wants_keyboard_input() {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F7)) {
+                self.cycle_theme(&ctx);
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F8)) {
+                self.colors_open = !self.colors_open;
+            }
+        }
         self.account_switch_ui(&ctx);
         self.colors_window(&ctx);
         self.presets_ui(&ctx);

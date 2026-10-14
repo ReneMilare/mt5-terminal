@@ -59,6 +59,13 @@ levels = [0.236, 0.382, 0.5, 0.618, 0.786]
 # [studies.<indicador>]
 # <opção> = <valor>
 
+# Predefinições salvas pelo editor de cada indicador. Aplicar restaura só as opções dele.
+# [[study_presets]]
+# key = "kalman"
+# name = "Tendência seletiva M5 + H1"
+# [study_presets.values]
+# window = 20
+
 [mt5]
 # Abrir o MetaTrader 5 ao iniciar, se ele não estiver aberto.
 auto_start = true
@@ -283,30 +290,106 @@ impl Colors {
     pub fn color(&self, key: &str) -> Color32 {
         parse_hex(self.get(key)).unwrap_or(Color32::MAGENTA)
     }
+
+    pub fn matches_preset(&self, preset: &PresetTheme) -> bool {
+        self.background.eq_ignore_ascii_case(preset.colors[0])
+            && self.panel.eq_ignore_ascii_case(preset.colors[1])
+            && self.grid.eq_ignore_ascii_case(preset.colors[2])
+            && self.text.eq_ignore_ascii_case(preset.colors[3])
+            && self.accent.eq_ignore_ascii_case(preset.colors[4])
+            && self.up.eq_ignore_ascii_case(preset.colors[5])
+            && self.down.eq_ignore_ascii_case(preset.colors[6])
+            && self.candle_up.eq_ignore_ascii_case(preset.colors[7])
+            && self.candle_down.eq_ignore_ascii_case(preset.colors[8])
+            && self.wick_up.eq_ignore_ascii_case(preset.colors[9])
+            && self.wick_down.eq_ignore_ascii_case(preset.colors[10])
+    }
 }
 
+/// Ready-made visual theme preset with ergonomic palettes for traders.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PresetTheme {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub colors: [&'static str; 11],
+}
+
+impl PresetTheme {
+    pub fn to_colors(self) -> Colors {
+        Colors {
+            background: self.colors[0].into(),
+            panel: self.colors[1].into(),
+            grid: self.colors[2].into(),
+            text: self.colors[3].into(),
+            accent: self.colors[4].into(),
+            up: self.colors[5].into(),
+            down: self.colors[6].into(),
+            candle_up: self.colors[7].into(),
+            candle_down: self.colors[8].into(),
+            wick_up: self.colors[9].into(),
+            wick_down: self.colors[10].into(),
+        }
+    }
+
+    pub fn bg_color(&self) -> Color32 {
+        parse_hex(self.colors[0]).unwrap_or(Color32::BLACK)
+    }
+
+    pub fn panel_color(&self) -> Color32 {
+        parse_hex(self.colors[1]).unwrap_or(Color32::DARK_GRAY)
+    }
+
+    pub fn up_color(&self) -> Color32 {
+        parse_hex(self.colors[7]).unwrap_or(Color32::GREEN)
+    }
+
+    pub fn down_color(&self) -> Color32 {
+        parse_hex(self.colors[8]).unwrap_or(Color32::RED)
+    }
+}
+
+pub const THEME_PRESETS: &[PresetTheme] = &[
+    PresetTheme {
+        name: "Charcoal Calm",
+        description: "Recomendado · Grafite fosco, contraste equilibrado e descanso ocular",
+        colors: ["#131722", "#1e222d", "#232733", "#d1d4dc", "#2962ff", "#26a69a", "#ef5350", "#26a69a", "#ef5350", "#26a69a", "#ef5350"],
+    },
+    PresetTheme {
+        name: "Tokyo Slate",
+        description: "Noturno · Tons ardósia frios, menta suave e coral",
+        colors: ["#16161e", "#1f2335", "#292e42", "#c0caf5", "#7aa2f7", "#73daca", "#f7768e", "#73daca", "#f7768e", "#73daca", "#f7768e"],
+    },
+    PresetTheme {
+        name: "Warm Earth",
+        description: "Anti-fadiga · Grafite aquecido, marfim e tons terrosos suaves",
+        colors: ["#1d2021", "#282828", "#32302f", "#ebdbb2", "#83a598", "#8ec07c", "#ea6962", "#8ec07c", "#ea6962", "#8ec07c", "#ea6962"],
+    },
+    PresetTheme {
+        name: "TradingView",
+        description: "Clássico TradingView escuro",
+        colors: ["#131722", "#1e222d", "#232837", "#d1d4dc", "#2962ff", "#089981", "#f23645", "#089981", "#f23645", "#089981", "#f23645"],
+    },
+    PresetTheme {
+        name: "Padrão escuro",
+        description: "Padrão original do MT5 Terminal",
+        colors: ["#0d1117", "#0f131a", "#191f29", "#d6dce6", "#3b82f6", "#26a69a", "#ef5350", "#26a69a", "#ef5350", "#26a69a", "#ef5350"],
+    },
+    PresetTheme {
+        name: "MetaTrader clássico",
+        description: "Green on black com candles vazados",
+        colors: ["#000000", "#101010", "#2f3a45", "#ffffff", "#1e90ff", "#00ff00", "#ff3030", "#000000", "#ffffff", "#00ff00", "#00ff00"],
+    },
+    PresetTheme {
+        name: "Claro",
+        description: "Tema diurno de alto contraste",
+        colors: ["#ffffff", "#f3f4f6", "#e5e7eb", "#111827", "#2563eb", "#089981", "#f23645", "#089981", "#f23645", "#089981", "#f23645"],
+    },
+];
+
 /// Ready-made schemes for the Colors window: (name, colors).
+#[allow(dead_code)]
 pub fn presets() -> Vec<(&'static str, Colors)> {
-    let c = |v: [&str; 11]| Colors {
-        background: v[0].into(),
-        panel: v[1].into(),
-        grid: v[2].into(),
-        text: v[3].into(),
-        accent: v[4].into(),
-        up: v[5].into(),
-        down: v[6].into(),
-        candle_up: v[7].into(),
-        candle_down: v[8].into(),
-        wick_up: v[9].into(),
-        wick_down: v[10].into(),
-    };
-    vec![
-        ("Padrão escuro", Settings::default().colors),
-        // MT5's default "Green on Black": hollow bull candles, white bear bodies, lime bars
-        ("MetaTrader clássico", c(["#000000", "#101010", "#2f3a45", "#ffffff", "#1e90ff", "#00ff00", "#ff3030", "#000000", "#ffffff", "#00ff00", "#00ff00"])),
-        ("Claro", c(["#ffffff", "#f3f4f6", "#e5e7eb", "#111827", "#2563eb", "#089981", "#f23645", "#089981", "#f23645", "#089981", "#f23645"])),
-        ("TradingView", c(["#131722", "#1e222d", "#232837", "#d1d4dc", "#2962ff", "#089981", "#f23645", "#089981", "#f23645", "#089981", "#f23645"])),
-    ]
+    THEME_PRESETS.iter().map(|p| (p.name, p.to_colors())).collect()
 }
 
 pub fn color_hex(c: Color32) -> String {
@@ -358,6 +441,14 @@ pub struct Ticket {
     pub preset: String,
 }
 
+/// A named snapshot of one indicator's options, including its default values.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct IndicatorPreset {
+    pub key: String,
+    pub name: String,
+    pub values: toml::Table,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Settings {
     pub chart: Chart,
@@ -374,6 +465,9 @@ pub struct Settings {
     /// `[studies.<indicator>]`: the options each indicator changed (checked by the preset).
     #[serde(default)]
     pub studies: toml::Table,
+    /// `[[study_presets]]`: saved independently of the options currently being tested.
+    #[serde(default)]
+    pub study_presets: Vec<IndicatorPreset>,
 }
 
 impl Default for Settings {
@@ -441,6 +535,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
     let mut known = merged.clone();
     known.insert("accounts".into(), toml::Value::Array(Vec::new()));
     known.insert("presets".into(), toml::Value::Array(Vec::new()));
+    known.insert("study_presets".into(), toml::Value::Array(Vec::new()));
     // checked by the indicators themselves (they know their options)
     known.insert("studies".into(), toml::Value::Array(Vec::new()));
     unknown_keys(&user, &known, "", &mut warnings);
@@ -723,6 +818,43 @@ pub fn save_study(key: &str, values: &toml::Table) -> std::io::Result<()> {
     std::fs::write(&p, doc.to_string())
 }
 
+/// Save or update one named indicator snapshot without changing the active settings.
+pub fn save_study_preset(key: &str, name: &str, values: &toml::Table) -> std::io::Result<Vec<IndicatorPreset>> {
+    let path = Settings::init()?;
+    let text = std::fs::read_to_string(&path)?;
+    let (text, presets) = study_preset_document(&text, key, name, values).map_err(std::io::Error::other)?;
+    std::fs::write(path, text)?;
+    Ok(presets)
+}
+
+fn study_preset_document(text: &str, key: &str, name: &str, values: &toml::Table) -> Result<(String, Vec<IndicatorPreset>), String> {
+    let name = name.trim();
+    if key.is_empty() || name.is_empty() || name.chars().any(char::is_control) {
+        return Err("dê um nome à predefinição".into());
+    }
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| e.to_string())?;
+    if !doc.contains_key("study_presets") {
+        doc.insert("study_presets", toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    }
+    let presets = doc["study_presets"].as_array_of_tables_mut().ok_or("study_presets deve ser uma lista de tabelas")?;
+    let mut table = toml_edit::Table::new();
+    for (key, value) in values {
+        table[key.as_str()] = toml_edit::value(edit_value(value));
+    }
+    if let Some(preset) = presets.iter_mut().find(|p| p.get("key").and_then(toml_edit::Item::as_str) == Some(key) && p.get("name").and_then(toml_edit::Item::as_str) == Some(name)) {
+        preset["values"] = toml_edit::Item::Table(table);
+    } else {
+        let mut preset = toml_edit::Table::new();
+        preset["key"] = toml_edit::value(key);
+        preset["name"] = toml_edit::value(name);
+        preset["values"] = toml_edit::Item::Table(table);
+        presets.push(preset);
+    }
+    let text = doc.to_string();
+    let (settings, _) = parse(&text)?;
+    Ok((text, settings.study_presets))
+}
+
 fn edit_value(v: &toml::Value) -> toml_edit::Value {
     match v {
         toml::Value::Boolean(b) => (*b).into(),
@@ -821,6 +953,31 @@ mod tests {
     }
 
     #[test]
+    fn indicator_snapshots_keep_live_settings_and_other_named_presets() {
+        let original = "# keep this comment\n[studies.kalman]\nwindow = 500\nslope_threshold = 0.16\n[chart]\nsymbol = 'UsaInd'\n";
+        let values: toml::Table = "window = 20\nlevel_noise = 0.08415\nslope_noise = 0.01502\nslope_threshold = 1.5\nconfluence = ['M5', 'H1']\n".parse().unwrap();
+        let (text, presets) = study_preset_document(original, "kalman", " Seletiva ", &values).unwrap();
+        assert_eq!(presets[0].name, "Seletiva");
+        assert_eq!(presets[0].values, values, "retain numeric precision and every saved value");
+        assert!(text.contains("# keep this comment"));
+        let before = parse(original).unwrap().0;
+        let (after, warnings) = parse(&text).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(after.studies, before.studies, "saving does not apply a preset");
+        assert_eq!(after.chart, before.chart);
+        let (text, _) = study_preset_document(&text, "kalman", "Outro", &values).unwrap();
+        let (text, _) = study_preset_document(&text, "vwap", "Seletiva", &values).unwrap();
+        let updated: toml::Table = "window = 50".parse().unwrap();
+        let (text, presets) = study_preset_document(&text, "kalman", "Seletiva", &updated).unwrap();
+        assert_eq!(presets.len(), 3, "update only the matching indicator and name");
+        assert_eq!(presets[0].values, updated);
+        assert_eq!(presets[1].values, values);
+        assert_eq!(presets[2].values, values);
+        assert_eq!(parse(&text).unwrap().0.studies, before.studies);
+        assert!(study_preset_document(&text, "kalman", " ", &values).is_err());
+    }
+
+    #[test]
     fn charts_side_by_side_parse_and_skip_bad_entries() {
         let (s, warnings) = parse("").unwrap();
         assert_eq!((s.chart.layout, s.chart.charts.len()), (Grid::One, 0));
@@ -874,6 +1031,10 @@ mod tests {
             for (key, _) in COLOR_KEYS {
                 assert!(parse_hex(c.get(key)).is_some(), "{name}: {key}");
             }
+        }
+        for theme in THEME_PRESETS {
+            let colors = theme.to_colors();
+            assert!(colors.matches_preset(theme), "matches_preset failed for {}", theme.name);
         }
         assert_eq!(color_hex(Color32::from_rgb(1, 2, 255)), "#0102ff");
         let (s, w) = parse("[ticket]\npreset = \"P\"\n[[presets]]\nname = \"P\"\nvolume = 0.2\nstop = 0.2\ntarget = 0.4\n").unwrap();

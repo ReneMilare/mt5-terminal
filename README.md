@@ -161,6 +161,12 @@ compiled in when the folder exists, through the interface in [src/studies.rs](sr
 Without it the app runs with a clean chart, as in the screenshots above. A preset can replace the
 volume band (e.g. volume delta), mark a price per bar (e.g. POC) and add a pane under the chart.
 
+The **Kalman Trend** editor also saves named configurations. Right-click the indicator → **Editar**,
+enter a name and choose **Salvar como**. To restore a configuration after experimenting, select it
+under **Predefinições salvas** and choose **Aplicar**. Saved configurations include every Kalman option
+and remain independent of the active settings, under `[[study_presets]]` in `config.toml`. Saving
+with an existing name explicitly shows **Atualizar**. The **Padrão** button restores the factory defaults.
+
 The author's preset includes automatic Fibonacci on **M5, M15, H1 and D1**, feeding the confluences
 of its support/resistance map. It uses the last swing between a high and a low confirmed by 2 closed
 bars on each side, within the last 300 closed bars of each series. Default retracements: **23.6%,

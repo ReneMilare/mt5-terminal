@@ -28,6 +28,7 @@ Comandos (mt5-terminal ctl <comando>):
   studies <on|off>         liga/desliga os indicadores (grava no config.toml)
   layers <a,b,c,d>         ordem de desenho, de trás para a frente: levels, indicators, trades, price
   front <camada>           põe uma camada na frente (grava no config.toml)
+  theme [NOME]             troca o tema visual ou lista os disponíveis (grava no config.toml)
   reload                   relê o config.toml
   config                   caminho do config.toml
   help";
@@ -144,6 +145,24 @@ fn execute(line: &str, shared: &Shared, tx: &Sender<Action>) -> String {
             (_, Err(e)) => e,
             (None, _) => "erro: camada? levels, indicators, trades ou price".into(),
         },
+        "theme" => {
+            let name = line.strip_prefix("theme").unwrap_or("").trim().trim_matches('"');
+            if name.is_empty() {
+                let themes: Vec<&str> = settings::THEME_PRESETS.iter().map(|p| p.name).collect();
+                format!("temas disponíveis: {}", themes.join(", "))
+            } else {
+                match settings::THEME_PRESETS.iter().find(|p| p.name.eq_ignore_ascii_case(name)) {
+                    Some(p) => match settings::save_colors(&p.to_colors()) {
+                        Ok(()) => queue(Action::Reload, format!("tema \"{}\" aplicado", p.name)),
+                        Err(e) => format!("erro: não gravou o config.toml: {e}"),
+                    },
+                    None => {
+                        let themes: Vec<&str> = settings::THEME_PRESETS.iter().map(|p| p.name).collect();
+                        format!("erro: tema \"{name}\" não existe. Disponíveis: {}", themes.join(", "))
+                    }
+                }
+            }
+        }
         _ => format!("erro: comando {line:?}\n{HELP}"),
     }
 }
@@ -195,7 +214,10 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(Action::Chart(2)));
         assert!(execute("chart 0", &shared, &tx).starts_with("erro"));
         assert!(execute("layers price,levels", &shared, &tx).starts_with("erro"));
-        assert!(execute("front nada", &shared, &tx).starts_with("erro"));
+        assert!(execute("theme", &shared, &tx).contains("Charcoal Calm"));
+        assert!(execute("theme Tokyo Slate", &shared, &tx).starts_with("ok"));
+        assert_eq!(rx.try_recv(), Ok(Action::Reload));
+        assert!(execute("theme Inexistente", &shared, &tx).starts_with("erro"));
         assert!(execute("comprar 1", &shared, &tx).starts_with("erro"), "ctl never trades");
         *shared.state.lock().unwrap() = "{\"symbol\":\"X\"}".into();
         assert_eq!(execute("state", &shared, &tx), "{\"symbol\":\"X\"}");
