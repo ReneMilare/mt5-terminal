@@ -1,0 +1,217 @@
+Testes com preset
+
+running 123 tests
+test chart::axis::tests::buckets_follow_calendar ... ok
+test chart::axis::tests::nice_steps ... ok
+test chart::axis::tests::ticks_and_decimals ... ok
+test chart::tests::changing_cursor_and_reset_clear_measurement ... ok
+test chart::axis::tests::time_labels ... ok
+test chart::tests::live_ask_is_in_auto_range_only_when_latest_bar_is_visible ... ok
+test chart::tests::measurement_counts_intervals_and_signed_percentage_from_start ... ok
+test chart::tests::quote_tags_avoid_nearby_operation_prices ... ok
+test chart::tests::quote_tags_remain_separate_at_zero_spread_and_axis_edges ... ok
+test chart::tests::double_click_without_drag_keeps_order_and_alt_and_remove_still_work ... ok
+test chart::tests::date_jump_centers_after_history_prepend_and_today_resumes_following ... ok
+test chart::tests::annotated_label_can_be_dragged_from_its_percent_and_updates_its_money_preview ... ok
+test chart::tests::locked_chart_shows_quote_without_order_preview_and_trades_draw_on_top ... ok
+test chart::tests::right_click_finds_the_indicator_under_the_pointer ... ok
+test chart::tests::label_second_press_is_captured_when_first_release_arrives_in_the_same_frame ... ok
+test control::tests::commands_validate_and_queue ... ok
+test feed::bridge::tests::roundtrip_with_fake_ea ... ok
+test chart::tests::label_drag_completes_when_second_press_motion_and_release_are_batched ... ok
+test chart::tests::refit_recovers_offscreen_candles_without_changing_date_or_zoom ... ok
+test feed::synthetic::tests::directional_trades_scale_in_and_out_on_both_sides_without_hedging ... ok
+test feed::synthetic::tests::paper_fills_and_triggers ... ok
+test feed::synthetic::tests::paper_daily_result_separates_closed_and_open_and_resets_at_midnight ... ok
+test feed::tests::daily_result_wire_accepts_history_pending ... ok
+test feed::tests::symbol_tick_values_decode_and_old_bridges_leave_them_unavailable ... ok
+test feed::synthetic::tests::paper_modifies_orders_and_stops ... ok
+test feed::tests::trade_wire_format ... ok
+test feed::synthetic::tests::reduce_only_rejects_excess_and_invalid_volume_without_mutating_the_book ... ok
+test feed::tests::wire_format ... ok
+test launcher::tests::terminal_by_program_only ... ok
+test model::tests::history_revision_tracks_closed_corrections_without_invalidating_ticks ... ok
+test history::tests::pages_back_until_covered_or_exhausted ... ok
+test history::tests::bar_count_requests_only_missing_history_across_session_gaps ... ok
+test model::tests::delta_by_tick_rule ... ok
+test launcher::tests::login_config_for_mt5 ... ok
+test model::tests::ticks_build_bars ... ok
+test model::tests::merge_keeps_order ... ok
+test model::tests::week_opens_on_sunday ... ok
+test navigation::tests::missing_session_and_exhausted_history_show_available_bars ... ok
+test navigation::tests::validates_calendar_dates_and_accepts_brazilian_and_iso_formats ... ok
+test navigation::tests::pages_until_target_then_resolves_once_and_can_cancel ... ok
+test panes::tests::cells_cover_the_area_row_by_row_without_overlap ... ok
+test navigation::tests::weekly_chart_selects_the_candle_containing_the_day ... ok
+test preset::bench::bench_chart_indicators ... ignored
+test preset::ctx::tests::calendar ... ok
+test panes::tests::extra_charts_come_from_the_config_or_the_next_symbols ... ok
+test preset::delta::tests::row_is_a_round_multiple_of_the_tick ... ok
+test preset::ctx::tests::clocks ... ok
+test preset::delta::tests::ticks_refresh_like_a_full_rebuild ... ok
+test preset::fibonacci::tests::confirmed_rise_and_fall_retrace_from_the_endpoint ... ok
+test preset::fibonacci::tests::forming_bar_cannot_confirm_or_move_a_pivot ... ok
+test preset::fibonacci::tests::plateau_uses_latest_bar_and_ambiguous_outside_bar_is_ignored ... ok
+test preset::gex::tests::basis_interpolates_inside_the_minute ... ok
+test preset::gex::tests::parses_exporter_files ... ok
+test preset::fibonacci::tests::timeframes_are_independent_and_corrections_invalidate_cache ... ok
+test preset::levels::tests::fibonacci_votes_once_per_timeframe_and_preserves_legacy_baseline ... ok
+test preset::levels::tests::atr_uses_true_range ... ok
+test preset::levels::tests::groups_and_picks_confluences_first ... ok
+test preset::math::tests::percentile_ties ... ok
+test preset::math::tests::value_area_grows_from_poc ... ok
+test preset::levels::tests::legacy_candidate_cap_does_not_discard_fibonacci ... ok
+test preset::math::tests::variance_ratio_signs ... ok
+test preset::math::tests::weighted_matches_direct ... ok
+test preset::options::tests::anchors_use_first_open_session_of_week_and_dst ... ok
+test preset::options::tests::bench_hourly_context ... ignored, release benchmark
+test preset::confluence::tests::all_up_is_buy_confluence_and_disagreement_is_none ... ok
+test preset::options::tests::invalid_and_missing_data_are_not_zero_estimates ... ok
+test preset::options::tests::missing_daily_iv_does_not_create_hourly_bands ... ok
+test preset::options::tests::ranges_use_calendar_time_and_exact_opening ... ok
+test preset::options::tests::hourly_range_rolls_with_exact_h1_and_never_backdates_publication ... ok
+test preset::poc::tests::interval_is_inclusive_and_excludes_more_extreme_candles ... ok
+test preset::options::tests::publication_is_causal_and_stale_quotes_keep_labelled_reference_bands ... ok
+test preset::poc::tests::missing_and_constant_references_do_not_produce_signals ... ok
+test preset::poc::tests::previous_twenty_and_both_delta_sides_define_the_selection ... ok
+test preset::poc::tests::ticks_do_not_repaint_closed_marks_but_corrections_and_options_do ... ok
+test preset::regime::tests::axes_warm_independently_and_ignore_forming_prices ... ok
+test preset::regime::tests::gamma_turns_negative_without_using_future_or_expired_snapshots ... ok
+test preset::research::daily ... ignored
+test preset::research::intraday ... ignored
+test preset::research::seasonal ... ignored
+test preset::study::kalman_study ... ignored
+test preset::study::kalman_study_adaptive_confluence ... ignored
+test preset::study::kalman_study_confluence ... ignored
+test preset::study::kalman_study_four_timeframes ... ignored
+test preset::study::kalman_study_four_timeframes_robustness ... ignored
+test preset::study::kalman_study_slope_scale ... ignored
+test preset::tests::option_horizons_can_be_hidden_independently ... ok
+test preset::tests::poc_delta_filter_changes_display_without_changing_raw_poc ... ok
+test chart::tests::right_click_on_a_line_or_panel_offers_to_edit_its_indicator ... ok
+test chart::tests::outside_or_locked_labels_keep_the_selected_chart_gesture ... ok
+test preset::trend::tests::hysteresis_holds_the_trend_until_the_exit ... ok
+test preset::trend::tests::older_bars_shift_without_recompute ... ok
+test preset::trend::tests::kalman_incremental_equals_full ... ok
+test preset::trend::tests::vwap_resets_each_day ... ok
+test preset::trend::tests::adaptive_and_hysteresis_stay_incremental ... ok
+test settings::tests::auto_scale_defaults_for_old_configs_and_accepts_manual_mode ... ok
+test settings::tests::cursor_config_accepts_modes_and_old_files_keep_default ... ok
+test preset::confluence::tests::incremental_equals_full_without_lookahead ... ok
+test settings::tests::charts_side_by_side_parse_and_skip_bad_entries ... ok
+test settings::tests::defaults_parse_and_match ... ok
+test studies::tests::options_load_clamp_and_store_only_changes ... ok
+test studies::tests::snapshot_restores_default_values_after_experimenting ... ok
+test trading::tests::chart_drags_become_modifies ... ok
+test trading::tests::daily_result_is_account_wide_and_cleared_on_disconnect ... ok
+test trading::tests::decimals_of_steps ... ok
+test trading::tests::grid_rounding_has_no_float_noise ... ok
+test trading::tests::market_buttons_and_chart_use_directional_trades_on_netting_and_hedging ... ok
+test trading::tests::market_order_levels_from_quote ... ok
+test settings::tests::partial_file_over_defaults_with_warnings ... ok
+test trading::tests::old_bridge_and_real_account_remain_locked ... ok
+test trading::tests::preset_sets_volume_and_bracket ... ok
+test trading::tests::reverse_and_breakeven ... ok
+test settings::tests::fibonacci_defaults_work_with_old_configs_and_validate_inputs ... ok
+test trading::tests::stop_and_target_labels_value_buys_sells_and_protected_profit_in_account_currency ... ok
+test chart::tests::only_hand_pans_cross_measures_and_arrow_stays_still ... ok
+test trading::tests::ticket_symbol_change_reuses_known_rules_and_levels_use_their_symbol ... ok
+test settings::tests::indicator_snapshots_keep_live_settings_and_other_named_presets ... ok
+test chart::tests::label_drag_works_without_click_history_after_a_long_hold_and_with_small_motion ... ok
+test chart::tests::label_capture_works_over_indicator_hover_labels ... ok
+test preset::tests::corrected_closed_history_rebuilds_regime_off_thread ... ok
+test preset::regime::tests::calendar_coverage_with_session_gaps_publishes_latest_regime ... ok
+test feed::synthetic::tests::aggregates_history ... ok
+test preset::regime::tests::incremental_equals_full_and_gamma_steps ... ok
+test chart::tests::double_press_label_drags_orders_stops_and_targets_without_alt ... ok
+
+test result: ok. 112 passed; 0 failed; 11 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+    Finished `release` profile [optimized] target(s) in 0.34s
+     Running unittests src/main.rs (target/release/deps/mt5_terminal-0b1c00e509098b98)
+
+
+Testes sem preset, cópia isolada
+
+running 70 tests
+test chart::axis::tests::buckets_follow_calendar ... ok
+test chart::axis::tests::nice_steps ... ok
+test chart::axis::tests::time_labels ... ok
+test chart::tests::changing_cursor_and_reset_clear_measurement ... ok
+test chart::tests::live_ask_is_in_auto_range_only_when_latest_bar_is_visible ... ok
+test chart::tests::measurement_counts_intervals_and_signed_percentage_from_start ... ok
+test chart::axis::tests::ticks_and_decimals ... ok
+test chart::tests::quote_tags_avoid_nearby_operation_prices ... ok
+test chart::tests::quote_tags_remain_separate_at_zero_spread_and_axis_edges ... ok
+test chart::tests::date_jump_centers_after_history_prepend_and_today_resumes_following ... ok
+test chart::tests::right_click_finds_the_indicator_under_the_pointer ... ok
+test chart::tests::locked_chart_shows_quote_without_order_preview_and_trades_draw_on_top ... ok
+test chart::tests::label_second_press_is_captured_when_first_release_arrives_in_the_same_frame ... ok
+test chart::tests::annotated_label_can_be_dragged_from_its_percent_and_updates_its_money_preview ... ok
+test control::tests::commands_validate_and_queue ... ok
+test chart::tests::double_click_without_drag_keeps_order_and_alt_and_remove_still_work ... ok
+test chart::tests::refit_recovers_offscreen_candles_without_changing_date_or_zoom ... ok
+test feed::bridge::tests::roundtrip_with_fake_ea ... ok
+test feed::synthetic::tests::paper_daily_result_separates_closed_and_open_and_resets_at_midnight ... ok
+test feed::synthetic::tests::paper_fills_and_triggers ... ok
+test chart::tests::label_drag_completes_when_second_press_motion_and_release_are_batched ... ok
+test feed::tests::daily_result_wire_accepts_history_pending ... ok
+test feed::synthetic::tests::directional_trades_scale_in_and_out_on_both_sides_without_hedging ... ok
+test feed::synthetic::tests::paper_modifies_orders_and_stops ... ok
+test feed::synthetic::tests::reduce_only_rejects_excess_and_invalid_volume_without_mutating_the_book ... ok
+test feed::tests::symbol_tick_values_decode_and_old_bridges_leave_them_unavailable ... ok
+test feed::tests::trade_wire_format ... ok
+test launcher::tests::login_config_for_mt5 ... ok
+test feed::tests::wire_format ... ok
+test launcher::tests::terminal_by_program_only ... ok
+test history::tests::bar_count_requests_only_missing_history_across_session_gaps ... ok
+test history::tests::pages_back_until_covered_or_exhausted ... ok
+test model::tests::delta_by_tick_rule ... ok
+test model::tests::history_revision_tracks_closed_corrections_without_invalidating_ticks ... ok
+test model::tests::merge_keeps_order ... ok
+test model::tests::ticks_build_bars ... ok
+test model::tests::week_opens_on_sunday ... ok
+test navigation::tests::missing_session_and_exhausted_history_show_available_bars ... ok
+test navigation::tests::pages_until_target_then_resolves_once_and_can_cancel ... ok
+test navigation::tests::weekly_chart_selects_the_candle_containing_the_day ... ok
+test navigation::tests::validates_calendar_dates_and_accepts_brazilian_and_iso_formats ... ok
+test panes::tests::cells_cover_the_area_row_by_row_without_overlap ... ok
+test panes::tests::extra_charts_come_from_the_config_or_the_next_symbols ... ok
+test settings::tests::charts_side_by_side_parse_and_skip_bad_entries ... ok
+test settings::tests::defaults_parse_and_match ... ok
+test settings::tests::cursor_config_accepts_modes_and_old_files_keep_default ... ok
+test studies::tests::options_load_clamp_and_store_only_changes ... ok
+test studies::tests::snapshot_restores_default_values_after_experimenting ... ok
+test settings::tests::auto_scale_defaults_for_old_configs_and_accepts_manual_mode ... ok
+test trading::tests::chart_drags_become_modifies ... ok
+test trading::tests::daily_result_is_account_wide_and_cleared_on_disconnect ... ok
+test settings::tests::fibonacci_defaults_work_with_old_configs_and_validate_inputs ... ok
+test settings::tests::partial_file_over_defaults_with_warnings ... ok
+test trading::tests::decimals_of_steps ... ok
+test trading::tests::grid_rounding_has_no_float_noise ... ok
+test trading::tests::market_buttons_and_chart_use_directional_trades_on_netting_and_hedging ... ok
+test trading::tests::market_order_levels_from_quote ... ok
+test trading::tests::old_bridge_and_real_account_remain_locked ... ok
+test trading::tests::preset_sets_volume_and_bracket ... ok
+test trading::tests::stop_and_target_labels_value_buys_sells_and_protected_profit_in_account_currency ... ok
+test trading::tests::reverse_and_breakeven ... ok
+test trading::tests::ticket_symbol_change_reuses_known_rules_and_levels_use_their_symbol ... ok
+test settings::tests::indicator_snapshots_keep_live_settings_and_other_named_presets ... ok
+test chart::tests::right_click_on_a_line_or_panel_offers_to_edit_its_indicator ... ok
+test chart::tests::outside_or_locked_labels_keep_the_selected_chart_gesture ... ok
+test chart::tests::only_hand_pans_cross_measures_and_arrow_stays_still ... ok
+test chart::tests::label_drag_works_without_click_history_after_a_long_hold_and_with_small_motion ... ok
+test chart::tests::label_capture_works_over_indicator_hover_labels ... ok
+test feed::synthetic::tests::aggregates_history ... ok
+test chart::tests::double_press_label_drags_orders_stops_and_targets_without_alt ... ok
+
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+   Compiling mt5-terminal v0.1.0 (/tmp/mt5-terminal-no-preset-1ejs59gq)
+    Finished `release` profile [optimized] target(s) in 7.78s
+     Running unittests src/main.rs (target/release/deps/mt5_terminal-0b1c00e509098b98)
+
+
+Compilação da versão com filtro POC
+   Compiling mt5-terminal v0.1.0 (/home/milare/Projects/mt5-terminal)
+    Finished `release` profile [optimized] target(s) in 13.25s

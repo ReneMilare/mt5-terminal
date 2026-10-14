@@ -1,0 +1,38 @@
+{
+  "UsaTec_M5.csv": {
+    "bars": 400000,
+    "first_server_time": 1612293600,
+    "last_server_time": 1791507000,
+    "sha256": "bebddbfad0810c0b3fab35c62b9a2126026138a92d24973638b20d9c21c1808f"
+  },
+  "UsaTec_M15.csv": {
+    "bars": 140000,
+    "first_server_time": 1603165500,
+    "last_server_time": 1791506700,
+    "sha256": "3db4258597d1475989665312cdceaea9c9bdbb686fd791e6548db82c320b218c"
+  },
+  "UsaTec_H1.csv": {
+    "bars": 40000,
+    "first_server_time": 1577822400,
+    "last_server_time": 1791504000,
+    "sha256": "42e1338bf60afe9d9f4e2b772f1b9ef6c3f84dbe4db783550d1d511ec253c7f8"
+  },
+  "UsaInd_M5.csv": {
+    "bars": 400000,
+    "first_server_time": 1612265100,
+    "last_server_time": 1791507000,
+    "sha256": "b0a546afee336ac13a226cbc4a5a86d74601ac6d938d98e48b5ec12e72413daa"
+  },
+  "UsaInd_M15.csv": {
+    "bars": 140000,
+    "first_server_time": 1603130400,
+    "last_server_time": 1791506700,
+    "sha256": "5278220a7cd77d4400a3af4b6a57f93ccd80d58f83eda152bd0b49454aa3f192"
+  },
+  "UsaInd_H1.csv": {
+    "bars": 40000,
+    "first_server_time": 1577797200,
+    "last_server_time": 1791504000,
+    "sha256": "4d8da885281a32ebb8b079d14b9c9229309ae1e007cd76a180fa82bc9ab3d62d"
+  }
+}

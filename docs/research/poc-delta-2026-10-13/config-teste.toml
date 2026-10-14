@@ -1,0 +1,6 @@
+[studies.poc]
+visible = true
+delta_filter = true
+delta_window = 20
+delta_min_sigma = 1.0
+delta_max_sigma = 2.0

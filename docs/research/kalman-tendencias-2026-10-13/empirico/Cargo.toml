@@ -1,0 +1,12 @@
+[package]
+name = "kalman-trend-diagnostics"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+chrono = "=0.4.45"
+
+[[bin]]
+name = "diagnostics"
+path = "diagnostics.rs"

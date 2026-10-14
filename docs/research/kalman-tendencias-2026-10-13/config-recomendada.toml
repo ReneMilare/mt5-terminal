@@ -1,0 +1,31 @@
+# UsaTec/UsaInd, acompanhamento intradiário no gráfico M5.
+# Substituir somente o bloco [studies.kalman] do config.toml.
+# Seleção descritiva: acompanhamento de movimentos, sem promessa de lucro.
+[studies.kalman]
+visible = true
+window = 50
+level_noise = 0.02
+slope_noise = 0.002
+measurement_noise = 1.0
+band_sigma = 1.96
+
+# Entrada com inclinação relevante; abandona a cor ao cruzar zero.
+slope_threshold = 1.0
+slope_exit = 0.0
+
+# Adaptação moderada pelos erros persistentes do filtro.
+adaptive = "innovation"
+adapt_gain = 2.0
+adapt_span = 20
+adapt_cap = 4.0
+
+# A linha acompanha o M5; H1 fornece contexto através das faixas e do fundo.
+# O mesmo conjunto de parâmetros é usado nos dois timeframes.
+confluence = ["M5", "H1"]
+coloring = "slope"
+ribbon = true
+background = true
+background_alpha = 22
+legend = true
+bands = true
+width = 2.0

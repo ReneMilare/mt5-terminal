@@ -1,0 +1,17 @@
+{
+  "adapt_cap": 10.0,
+  "adapt_gain": 0.5,
+  "adapt_span": 200,
+  "adaptive": "efficiency",
+  "background": true,
+  "confluence": [
+    "M5",
+    "H1"
+  ],
+  "level_noise": 0.2805,
+  "measurement_noise": 3.26,
+  "slope_exit": -0.92,
+  "slope_noise": 0.01502,
+  "slope_threshold": 0.16,
+  "window": 500
+}

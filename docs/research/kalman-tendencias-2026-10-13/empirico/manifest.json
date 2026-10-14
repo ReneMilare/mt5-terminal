@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-13",
+  "objective": "Descriptive trend tracking, no financial objective",
+  "data_reused": true,
+  "input_sha256": {
+    "/tmp/kalman-trend-data/UsaInd_H1.csv": "4d8da885281a32ebb8b079d14b9c9229309ae1e007cd76a180fa82bc9ab3d62d",
+    "/tmp/kalman-trend-data/UsaInd_M5.csv": "b0a546afee336ac13a226cbc4a5a86d74601ac6d938d98e48b5ec12e72413daa",
+    "/tmp/kalman-trend-data/UsaTec_H1.csv": "42e1338bf60afe9d9f4e2b772f1b9ef6c3f84dbe4db783550d1d511ec253c7f8",
+    "/tmp/kalman-trend-data/UsaTec_M5.csv": "bebddbfad0810c0b3fab35c62b9a2126026138a92d24973638b20d9c21c1808f",
+    "data/UsaInd_M15.csv": "5278220a7cd77d4400a3af4b6a57f93ccd80d58f83eda152bd0b49454aa3f192",
+    "data/UsaTec_M15.csv": "3db4258597d1475989665312cdceaea9c9bdbb686fd791e6548db82c320b218c"
+  },
+  "original_source_checks": {
+    "ctx.rs": {
+      "sha256": "74b8b77625db8d5be6bdcc393b2662bf8d2c2390b218d2846e7e66bb5097795f",
+      "identical_to_original": true
+    },
+    "math.rs": {
+      "sha256": "faaa39c8b421d4c3f1a022e66d2fff27621c9d449c1f9478b04ba1e7772a1c14",
+      "identical_to_original": true
+    },
+    "trend.rs": {
+      "sha256": "c71ca4dbc989593dee3af0efb6ec448c4fe0e78de30affef4866c0d40a6f3a46",
+      "identical_to_original": true
+    }
+  },
+  "scenarios": 86,
+  "metric_rows": 4644,
+  "synthetic_rows": 172,
+  "source_sha256": {
+    "diagnostics.rs": "0ca15c959dabe68a86f9fd94f5f837188bf352d707edd965b808b50d3c2606e2",
+    "analyze.py": "1e6366ae7dd02bfaab24f5b0692b24ef5d05a4e1a7a8fc44f8fdfb078ee28480",
+    "Cargo.toml": "4ed7ba94f2be0b24425c679987c85005c61e79ad8b3c6a21f844f234fdf84851",
+    "Cargo.lock": "cd3e2f1ea7c1a51f44c572101a0ac88fd05786458f5fda47110356e127582f48"
+  },
+  "checks": "incremental equivalence, future perturbation, derived colors and closed-H1 mapping for seven kernels and two indices; CSV count invariants passed",
+  "split": "2021-2022 / 2023-2024 / 2025-2026, all reused"
+}

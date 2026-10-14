@@ -1,0 +1,42 @@
+All results reuse history; aggregation combines both symbols. Medians below are means of group medians.
+Horizon 60 min, all reused blocks; illustrative predefined controls, not an optimized score:
+kernel entry exit view accuracy capture occupancy flips/session meanRunMin reversalMiss meanLag levelMedATR
+baseline_eff500          0.16 -0.92 M5           0.513 0.513 1.000 2.09 95.0 0.114 0.0 0.340
+baseline_eff500          0.16 -0.92 M5_H1        0.528 0.294 0.559 0.12 95.8 0.597 0.0 0.340
+baseline_eff500          0.16 -0.92 M5_M15_H1    0.532 0.231 0.439 0.07 94.2 0.758 0.0 0.340
+baseline_eff500          1    0     M5           0.515 0.317 0.598 1.66 56.7 0.181 0.0 0.340
+baseline_eff500          1    0     M5_H1        0.528 0.074 0.147 0.02 54.2 0.874 0.0 0.340
+baseline_eff500          1    0     M5_M15_H1    0.531 0.059 0.116 0.01 54.2 0.934 11.7 0.340
+default50                0.1  0.1   M5           0.510 0.491 0.960 4.42 47.5 0.007 0.0 0.448
+default50                0.1  0.1   M5_H1        0.524 0.273 0.525 0.35 48.3 0.589 0.0 0.448
+default50                0.1  0.1   M5_M15_H1    0.525 0.237 0.452 0.27 50.0 0.663 0.0 0.448
+default50                1    0     M5           0.512 0.410 0.794 2.53 60.8 0.023 0.0 0.448
+default50                1    0     M5_H1        0.527 0.184 0.358 0.11 59.2 0.684 0.0 0.448
+default50                1    0     M5_M15_H1    0.530 0.154 0.295 0.07 59.2 0.796 0.8 0.448
+fixed50                  1    0     M5           0.519 0.253 0.468 1.02 59.2 0.489 0.0 0.342
+fixed50                  1    0     M5_H1        0.538 0.069 0.132 0.01 53.3 0.914 1.7 0.342
+fixed50                  1    0     M5_M15_H1    0.541 0.060 0.114 0.01 55.0 0.949 20.8 0.342
+fixed500                 1    0     M5           0.515 0.316 0.597 1.66 56.7 0.182 0.0 0.340
+fixed500                 1    0     M5_H1        0.526 0.075 0.149 0.02 54.2 0.873 0.0 0.340
+fixed500                 1    0     M5_M15_H1    0.531 0.060 0.118 0.01 54.2 0.934 11.7 0.340
+innovation_base_g2       1    0     M5           0.520 0.176 0.314 0.56 51.7 0.732 0.8 0.258
+innovation_base_g2       1    0     M5_H1        0.534 0.037 0.071 0.00 45.0 0.967 22.5 0.258
+innovation_base_g2       1    0     M5_M15_H1    0.536 0.034 0.063 0.00 45.0 0.976 32.5 0.258
+innovation_default_g2    1    0     M5           0.515 0.366 0.697 2.54 49.2 0.079 0.0 0.345
+innovation_default_g2    1    0     M5_H1        0.529 0.148 0.291 0.10 49.2 0.736 0.0 0.345
+innovation_default_g2    1    0     M5_M15_H1    0.527 0.124 0.241 0.06 50.0 0.821 9.2 0.345
+innovation_default_g4    1    0     M5           0.516 0.312 0.591 2.25 42.5 0.214 0.0 0.272
+innovation_default_g4    1    0     M5_H1        0.530 0.115 0.227 0.09 40.8 0.798 0.0 0.272
+innovation_default_g4    1    0     M5_M15_H1    0.530 0.099 0.190 0.06 42.5 0.865 11.7 0.272
+
+Old visual CSV: ten most stable configurations by changes/session (descriptive only)
+{'kernel': 'Efficiency_29', 'state': '173', 'entry': '2', 'exit': '0.16', 'changes_per_session': 0.004609929078014184, 'occupancy': 0.0005565693430656934, 'aligned_occupancy': 9.124087591240877e-06, 'mean_median_minutes': 37.916666666666664}
+{'kernel': 'Efficiency_29', 'state': '173', 'entry': '2', 'exit': '0', 'changes_per_session': 0.007801418439716312, 'occupancy': 0.0013184306569343066, 'aligned_occupancy': 5.4744525547445253e-05, 'mean_median_minutes': 71.25}
+{'kernel': 'Efficiency_29', 'state': '173', 'entry': '2', 'exit': '-0.62', 'changes_per_session': 0.00851063829787234, 'occupancy': 0.0040374087591240875, 'aligned_occupancy': 0.00018704379562043796, 'mean_median_minutes': 140.41666666666666}
+{'kernel': 'Efficiency_29', 'state': '173', 'entry': '2', 'exit': '-0.2', 'changes_per_session': 0.00851063829787234, 'occupancy': 0.0019434306569343065, 'aligned_occupancy': 5.930656934306569e-05, 'mean_median_minutes': 83.33333333333333}
+{'kernel': 'Innovation_20', 'state': '116', 'entry': '2', 'exit': '0.16', 'changes_per_session': 0.00851063829787234, 'occupancy': 0.001072080291970803, 'aligned_occupancy': 4.105839416058394e-05, 'mean_median_minutes': 42.5}
+{'kernel': 'Innovation_20', 'state': '116', 'entry': '2', 'exit': '0', 'changes_per_session': 0.009574468085106383, 'occupancy': 0.0017837591240875913, 'aligned_occupancy': 8.667883211678832e-05, 'mean_median_minutes': 49.583333333333336}
+{'kernel': 'Innovation_20', 'state': '116', 'entry': '2', 'exit': '-0.62', 'changes_per_session': 0.012056737588652482, 'occupancy': 0.011227189781021898, 'aligned_occupancy': 0.00024635036496350364, 'mean_median_minutes': 232.91666666666666}
+{'kernel': 'Innovation_20', 'state': '116', 'entry': '2', 'exit': '-0.2', 'changes_per_session': 0.012411347517730497, 'occupancy': 0.0031797445255474454, 'aligned_occupancy': 0.00012773722627737227, 'mean_median_minutes': 76.66666666666667}
+{'kernel': 'Innovation_19', 'state': '115', 'entry': '2', 'exit': '-0.62', 'changes_per_session': 0.01950354609929078, 'occupancy': 0.017878649635036496, 'aligned_occupancy': 0.0011313868613138686, 'mean_median_minutes': 249.58333333333334}
+{'kernel': 'Innovation_19', 'state': '115', 'entry': '2', 'exit': '0', 'changes_per_session': 0.02127659574468085, 'occupancy': 0.007103102189781022, 'aligned_occupancy': 0.00021897810218978101, 'mean_median_minutes': 123.75}

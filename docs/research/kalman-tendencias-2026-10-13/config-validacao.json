@@ -1,0 +1,12 @@
+{
+  "config-recomendada.toml": {
+    "toml": true,
+    "interface_ranges": true,
+    "application_config_check": true
+  },
+  "config-classica.toml": {
+    "toml": true,
+    "interface_ranges": true,
+    "application_config_check": true
+  }
+}
